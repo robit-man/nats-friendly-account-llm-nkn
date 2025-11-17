@@ -310,6 +310,92 @@
       display: flex; flex-direction: column; gap: 8px;
       flex-shrink: 0;
     }
+    .chat-tools {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+    .tool-btn {
+      border: 1px solid var(--border-subtle);
+      background: var(--bg-input);
+      border-radius: var(--radius-inner);
+      padding: 6px 10px;
+      cursor: pointer;
+      color: var(--text-main);
+    }
+    .tool-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 10px;
+      border-radius: var(--radius-inner);
+      border: 1px solid var(--border-subtle);
+      background: var(--bg-input);
+      color: var(--text-main);
+      font-size: 12px;
+    }
+.upload-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: var(--radius-inner);
+  border: 1px dashed var(--border-subtle);
+  background: var(--bg-panel);
+  color: var(--text-main);
+  font-size: 12px;
+  max-width: 80%;
+  flex-wrap: wrap;
+}
+.upload-status .progress {
+  font-weight: 600;
+}
+.upload-status .status-icon {
+  width: 16px;
+  height: 16px;
+  display: inline-block;
+}
+.upload-status.success { border-color: #22c55e; }
+.upload-status.error { border-color: #ef4444; color: #b91c1c; }
+.upload-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.upload-name {
+  font-weight: 600;
+}
+.upload-thumb {
+  width: 38px;
+  height: 38px;
+  border-radius: 8px;
+  object-fit: cover;
+  border: 1px solid var(--border-subtle);
+  background: #f8fafc;
+}
+.upload-retry-btn {
+  border: 1px solid var(--border-subtle);
+  background: #fff;
+  padding: 4px 10px;
+  border-radius: var(--radius-inner);
+  font-size: 12px;
+  cursor: pointer;
+}
+.upload-retry-btn:hover {
+  background: var(--bg-input);
+}
+    .chip .remove {
+      border: none;
+      background: transparent;
+      cursor: pointer;
+      color: var(--text-muted);
+      font-size: 14px;
+      line-height: 1;
+    }
     .chat-input-field {
       position: relative;
       width: 100%;
@@ -714,7 +800,7 @@
   </div>
 
   <!-- Chat Interface View -->
-      <div class="chat-interface">
+  <div class="chat-interface">
     <header class="app-header">
       <div>
         <div class="app-header-title">INFERENCE</div>
@@ -791,6 +877,20 @@
             <div class="chat-input-field">
               <input id="chat-input" type="text" class="chat-input-field-control" placeholder="Send a message to model" required autocomplete="off">
               <button class="btn chat-input-submit" type="submit" id="send-btn" aria-label="Send message">↗</button>
+            </div>
+            <div class="chat-tools" id="chat-tools">
+              <div id="image-tool" class="tool images-tool">
+                <input type="file" id="image-input" accept="image/*" style="display:none">
+                <button type="button" class="tool-btn" id="attach-image-btn">Attach image</button>
+                <span class="chip hidden" id="image-chip">
+                  <span id="image-chip-label"></span>
+                  <button type="button" class="remove" id="remove-image-btn" aria-label="Remove image">×</button>
+                </span>
+              </div>
+              <label class="chip hidden" id="thinking-chip">
+                <input type="checkbox" id="thinking-toggle">
+                <span>Thinking</span>
+              </label>
             </div>
           </form>
         </div>
@@ -870,6 +970,13 @@ const state = {
   messages: [],
   selectedModel: null,
   availableModels: [],
+  currentCapabilities: { supports_images: false, supports_thinking: false },
+  pendingImage: null,
+  thinkingEnabled: false,
+  uploadStatuses: new Map(),
+  uploadToAssistant: new Map(),
+  uploadJobs: new Map(),
+  uploadGuards: new Map(),
   busy: false,
   pendingSend: false,
   nkn: {
@@ -915,6 +1022,13 @@ const els = {
   modelGrid: document.getElementById('model-grid'),
   modelModalClose: document.getElementById('model-modal-close'),
   modelModalSub: document.getElementById('model-modal-sub'),
+  attachImageBtn: document.getElementById('attach-image-btn'),
+  imageInput: document.getElementById('image-input'),
+  imageChip: document.getElementById('image-chip'),
+  imageChipLabel: document.getElementById('image-chip-label'),
+  removeImageBtn: document.getElementById('remove-image-btn'),
+  thinkingToggle: document.getElementById('thinking-toggle'),
+  thinkingChip: document.getElementById('thinking-chip'),
   sessionsSidebar: document.getElementById('sessions-sidebar'),
   sidebarToggle: document.getElementById('sidebar-toggle'),
   sidebarInlineToggle: document.getElementById('sidebar-toggle-inline'),
@@ -948,6 +1062,11 @@ const els = {
 
 function getCurrentSession(){
   return state.sessions.find((s) => s.id === state.currentSessionId) || null;
+}
+
+function getCapabilitiesForModel(modelName){
+  const target = (state.availableModels || []).find((m) => m.name === modelName);
+  return (target && target.capabilities) || { supports_images: false, supports_thinking: false };
 }
 
 function getModelLabel(){
@@ -984,10 +1103,19 @@ function syncCurrentModelFromState(modelHint){
   } else if (!state.selectedModel && state.relayInfo && state.relayInfo.model){
     state.selectedModel = state.relayInfo.model;
   }
+  state.currentCapabilities = getCapabilitiesForModel(state.selectedModel);
+  updateToolVisibility();
   updateModelDisplay();
 }
 
 updateModelDisplay();
+
+function inferCapabilitiesFromNameFrontend(name){
+  const lowered = (name || '').toLowerCase();
+  const supportsImages = ['vision', 'vl', 'clip', 'llava', 'vmodel', 'gpt-4o', 'vision-', 'mm', 'multimodal', 'moondream', 'idefics', 'qwen-vl'].some(k => lowered.includes(k));
+  const supportsThinking = ['think', 'deepseek', 'reason', 'qwen2.5', 'qwen2.5-thinking', 'thinking'].some(k => lowered.includes(k));
+  return { supports_images: supportsImages, supports_thinking: supportsThinking };
+}
 
 async function fetchAvailableModels(){
   if (!state.session) {
@@ -1001,9 +1129,24 @@ async function fetchAvailableModels(){
     const resp = await nknSendRequestWithRetry({ event: 'models.list' });
     const raw = Array.isArray(resp.models) ? resp.models : [];
     state.availableModels = raw
-      .map((m) => (typeof m === 'string' ? { name: m } : m))
+      .map((m) => {
+        const entry = (typeof m === 'string' ? { name: m } : m) || {};
+        const detailsCaps = Array.isArray(entry.details?.capabilities) ? entry.details.capabilities : [];
+        const mergedCaps = entry.capabilities || {};
+        entry.capabilities = {
+          supports_images: Boolean(mergedCaps.supports_images) || detailsCaps.some(c => typeof c === 'string' && /vision|image|multimodal|vl|mm/i.test(c)),
+          supports_thinking: Boolean(mergedCaps.supports_thinking) || detailsCaps.some(c => typeof c === 'string' && /think|reason|monologue/i.test(c)),
+        };
+        // Fallback heuristics if still false
+        const inferred = inferCapabilitiesFromNameFrontend(entry.name);
+        entry.capabilities.supports_images = entry.capabilities.supports_images || inferred.supports_images;
+        entry.capabilities.supports_thinking = entry.capabilities.supports_thinking || inferred.supports_thinking;
+        return entry;
+      })
       .filter((m) => m && m.name);
     renderModelOptions();
+    state.currentCapabilities = getCapabilitiesForModel(getModelLabel());
+    updateToolVisibility();
     return state.availableModels;
   } catch (err) {
     console.warn('Failed to load models', err);
@@ -1028,10 +1171,12 @@ function renderModelOptions(){
     const size = meta && meta.size ? meta.size : '';
     const metaText = size ? String(size) : 'Click to use for this chat';
     const active = name === current ? 'active' : '';
+    const capBadges = formatCapabilityBadges(model.capabilities);
     return `
       <button type="button" class="model-card ${active}" data-model="${name}">
         <div class="model-card-title">${name}</div>
         <div class="model-card-meta">${metaText}</div>
+        <div class="model-card-meta">${capBadges}</div>
       </button>
     `;
   }).join('');
@@ -1073,6 +1218,8 @@ function updateModelModalSub(){
 async function handleModelSelect(modelName){
   try {
     await setSessionModel(modelName);
+    state.currentCapabilities = getCapabilitiesForModel(modelName);
+    updateToolVisibility();
     closeModelModal();
   } catch (err) {
     toast(err.message || 'Unable to set model', false);
@@ -1306,7 +1453,7 @@ function logActivity(text, ok=true){
 
 function shouldRetryNknError(err){
   const msg = String(err && err.message || err || '').toLowerCase();
-  return msg.includes('message timeout') || msg.includes('failed to send') || msg.includes('timeout');
+  return msg.includes('message timeout') || msg.includes('failed to send') || msg.includes('timeout') || msg.includes("readystate is not") || msg.includes('rtcdatachannel');
 }
 
 function resetNknClient(){
@@ -2083,6 +2230,250 @@ function normalizeMessage(msg, fallbackModel){
   return normalized;
 }
 
+function formatCapabilityBadges(capabilities){
+  const caps = capabilities || {};
+  const labels = Object.entries(caps)
+    .filter(([, enabled]) => !!enabled)
+    .map(([key]) => {
+      switch (key) {
+        case 'supports_images': return 'Images';
+        case 'supports_thinking': return 'Thinking';
+        default: return key.replace(/_/g, ' ');
+      }
+    });
+  return labels.map(label => `<span class="chip">${label}</span>`).join(' ');
+}
+
+function addUploadStatus(uploadId, totalChunks, fileLabel, thumbnailUrl){
+  if (!els.chat) return;
+  const wrapper = document.createElement('div');
+  wrapper.className = 'chat-message chat-message-assistant';
+  wrapper.dataset.uploadId = uploadId;
+  const meta = document.createElement('div');
+  meta.className = 'chat-meta';
+  meta.textContent = 'Sending image…';
+  const bubble = document.createElement('div');
+  bubble.className = 'upload-status';
+  const thumbHtml = thumbnailUrl ? `<img src="${thumbnailUrl}" class="upload-thumb" alt="preview">` : '';
+  bubble.innerHTML = `<span class="status-icon">⏳</span>${thumbHtml}<div class="upload-meta"><span class="progress" id="upload-progress-${uploadId}">0/${totalChunks}</span><span class="upload-name">${fileLabel || 'image'}</span></div>`;
+  wrapper.appendChild(meta);
+  wrapper.appendChild(bubble);
+  els.chat.appendChild(wrapper);
+  els.chat.scrollTop = els.chat.scrollHeight;
+  state.uploadStatuses.set(uploadId, { wrapper, bubble, progress: bubble.querySelector(`#upload-progress-${uploadId}`), total: totalChunks, statusIcon: bubble.querySelector('.status-icon'), retryBtn: null, messageEl: null });
+}
+
+function resetUploadEntry(entry){
+  if (!entry) return;
+  if (entry.messageEl && entry.messageEl.parentNode){
+    entry.messageEl.parentNode.removeChild(entry.messageEl);
+  }
+  if (entry.retryBtn && entry.retryBtn.parentNode){
+    entry.retryBtn.parentNode.removeChild(entry.retryBtn);
+  }
+  entry.retryBtn = null;
+  entry.messageEl = null;
+}
+
+function updateUploadStatus(uploadId, received, total){
+  const entry = state.uploadStatuses.get(uploadId);
+  if (!entry) return;
+  resetUploadEntry(entry);
+  if (entry.progress) {
+    entry.progress.textContent = `${received}/${total || entry.total || '?'}`;
+  }
+  if (entry.bubble) {
+    entry.bubble.classList.remove('success', 'error');
+  }
+}
+
+function completeUploadStatus(uploadId){
+  const entry = state.uploadStatuses.get(uploadId);
+  if (!entry) return;
+  resetUploadEntry(entry);
+  if (entry.progress) entry.progress.textContent = '✓';
+  if (entry.bubble) {
+    entry.bubble.classList.remove('error');
+    entry.bubble.classList.add('success');
+    const icon = entry.statusIcon || entry.bubble.querySelector('.status-icon');
+    if (icon) icon.textContent = '✓';
+  }
+}
+
+function failUploadStatus(uploadId, message, options = {}){
+  const entry = state.uploadStatuses.get(uploadId);
+  if (!entry) return;
+  const { onRetry } = options;
+  resetUploadEntry(entry);
+  if (entry.progress) entry.progress.textContent = '✕';
+  if (entry.bubble) {
+    entry.bubble.classList.remove('success');
+    entry.bubble.classList.add('error');
+    const icon = entry.statusIcon || entry.bubble.querySelector('.status-icon');
+    if (icon) icon.textContent = '✕';
+    const msg = document.createElement('span');
+    msg.textContent = message || 'Upload failed';
+    entry.messageEl = msg;
+    entry.bubble.appendChild(msg);
+    if (typeof onRetry === 'function') {
+      const retryBtn = document.createElement('button');
+      retryBtn.type = 'button';
+      retryBtn.className = 'upload-retry-btn';
+      retryBtn.textContent = 'Retry';
+      retryBtn.addEventListener('click', () => onRetry());
+      entry.retryBtn = retryBtn;
+      entry.bubble.appendChild(retryBtn);
+    }
+  }
+}
+
+function removeUploadStatus(uploadId){
+  const entry = state.uploadStatuses.get(uploadId);
+  if (!entry) return;
+  resetUploadEntry(entry);
+  if (entry.wrapper && entry.wrapper.parentNode) {
+    entry.wrapper.parentNode.removeChild(entry.wrapper);
+  }
+  state.uploadStatuses.delete(uploadId);
+}
+
+function clearUploadTracking(uploadId, { removeStatus = true, delayMs = 0 } = {}){
+  const guard = state.uploadGuards.get(uploadId);
+  if (guard) clearTimeout(guard);
+  state.uploadGuards.delete(uploadId);
+  state.uploadToAssistant.delete(uploadId);
+  state.uploadJobs.delete(uploadId);
+  if (removeStatus){
+    if (delayMs > 0) {
+      setTimeout(() => removeUploadStatus(uploadId), delayMs);
+    } else {
+      removeUploadStatus(uploadId);
+    }
+  }
+}
+
+function registerUploadGuard(uploadId, assistantId, timeoutMs = 20000){
+  if (!uploadId) return;
+  state.uploadToAssistant.set(uploadId, assistantId);
+  const existing = state.uploadGuards.get(uploadId);
+  if (existing) clearTimeout(existing);
+  const timer = setTimeout(() => {
+    if (state.uploadStatuses.has(uploadId)) {
+      failUploadStatus(uploadId, 'Timed out waiting for reply', { onRetry: () => { cancelUploadGuard(uploadId); retryUpload(uploadId); } });
+      renderUploadFailureMessage('Upload timed out before model responded.', uploadId);
+      cancelUploadGuard(uploadId);
+      const cleanupTimer = setTimeout(() => clearUploadTracking(uploadId, { removeStatus: true }), 8000);
+      state.uploadGuards.set(uploadId, cleanupTimer);
+    } else {
+      clearUploadTracking(uploadId, { removeStatus: false });
+    }
+  }, timeoutMs);
+  state.uploadGuards.set(uploadId, timer);
+}
+
+function cancelUploadGuard(uploadId){
+  const guard = state.uploadGuards.get(uploadId);
+  if (guard) clearTimeout(guard);
+  state.uploadGuards.delete(uploadId);
+}
+
+function renderUploadFailureMessage(reason, uploadId){
+  const job = uploadId ? state.uploadJobs.get(uploadId) : null;
+  if (job && job.failureNoted) return;
+  if (job) job.failureNoted = true;
+  const friendly = reason ? `Image upload failed: ${reason}` : 'Image upload failed.';
+  const msgId = generateMessageId();
+  const content = `*${friendly}* Please retry your message.`;
+  renderBubble('assistant', content, msgId);
+  state.messages.push({ id: msgId, role: 'assistant', content, is_complete: true, model: getModelLabel() });
+}
+
+async function sendImageChunkWithAck(uploadId, chunk, job){
+  if (!requireRelay()) throw new Error('Relay address required');
+  await ensureNknClient();
+  const label = `${chunk.i + 1}/${chunk.t}`;
+  const sendOnce = async () => {
+    logActivity(`DM → image.upload ${label} (${uploadId}) len=${(chunk.data || '').length}`);
+    const resp = await nknSendRequestWithRetry({
+      event: 'image.upload',
+      upload_id: uploadId,
+      i: chunk.i,
+      t: chunk.t,
+      data: chunk.data,
+      mime: job.mime,
+      name: job.name
+    }, { timeoutMs: 15000, maxAttempts: 3 });
+    logActivity(`DM ← image.upload.ack ${label} (${uploadId}) received=${resp.received} total=${resp.total}`);
+    return resp;
+  };
+  try {
+    const resp = await sendOnce();
+    if (resp.upload_id && resp.upload_id !== uploadId){
+      throw new Error('Upload ID mismatch in ack');
+    }
+    if (typeof resp.received === 'number' && resp.received < chunk.i + 1){
+      throw new Error('Upload ack missing chunk confirmation');
+    }
+    return resp;
+  } catch (err){
+    const msg = String(err && err.message || err || '');
+    if (/RTCDataChannel\.readyState is not 'open'/i.test(msg)){
+      logActivity(`RTC channel not open, retrying chunk ${label} after reconnect`, false);
+      resetNknClient();
+      await ensureNknClient();
+      const resp = await sendOnce();
+      if (resp.upload_id && resp.upload_id !== uploadId){
+        throw new Error('Upload ID mismatch in ack');
+      }
+      return resp;
+    }
+    throw err;
+  }
+}
+
+async function uploadMissingChunks(uploadId){
+  const job = state.uploadJobs.get(uploadId);
+  if (!job) throw new Error('Upload not found');
+  if (job.inFlight) return;
+  if (!state.nkn.ready) logActivity(`[upload ${uploadId}] NKN not ready; will retry`);
+  if (!requireRelay()) throw new Error('Relay address required');
+  await ensureRelayReady();
+  await ensureNknClient();
+  job.inFlight = true;
+  try {
+    const missing = job.chunks.filter((chunk, idx) => !job.acknowledged[idx]);
+    const total = job.chunks.length;
+    logActivity(`[upload ${uploadId}] sending ${missing.length}/${total} chunks`);
+    for (const chunk of missing){
+      const resp = await sendImageChunkWithAck(uploadId, chunk, job);
+      job.acknowledged[chunk.i] = true;
+      const received = job.acknowledged.filter(Boolean).length;
+      updateUploadStatus(uploadId, resp.received || received, resp.total || total);
+      if (resp.complete || received === total) {
+        completeUploadStatus(uploadId);
+      }
+    }
+    const receivedTotal = job.acknowledged.filter(Boolean).length;
+    if (receivedTotal === total && !state.uploadToAssistant.has(uploadId)) {
+      clearUploadTracking(uploadId, { removeStatus: true, delayMs: 400 });
+    }
+  } finally {
+    job.inFlight = false;
+  }
+}
+
+async function retryUpload(uploadId){
+  const job = state.uploadJobs.get(uploadId);
+  if (!job || job.inFlight) return;
+  try {
+    await uploadMissingChunks(uploadId);
+    toast('Upload resumed', true);
+  } catch (err){
+    failUploadStatus(uploadId, err.message || 'Upload failed', { onRetry: () => retryUpload(uploadId) });
+    renderUploadFailureMessage(err.message || 'Could not upload image.', uploadId);
+  }
+}
+
 function mergeMessages(localMessages, dbMessages){
   // Merge DB messages with local messages, avoiding duplicates using UUIDs
   const messageMap = new Map();
@@ -2130,6 +2521,120 @@ function mergeMessages(localMessages, dbMessages){
   return Array.from(messageMap.values());
 }
 
+function updateToolVisibility(){
+  const caps = state.currentCapabilities || {};
+  if (els.imageTool){
+    els.imageTool.classList.toggle('hidden', !caps.supports_images);
+  }
+  if (els.thinkingChip){
+    els.thinkingChip.classList.toggle('hidden', !caps.supports_thinking);
+    if (!caps.supports_thinking){
+      state.thinkingEnabled = false;
+      if (els.thinkingToggle) els.thinkingToggle.checked = false;
+    }
+  }
+}
+
+function handleImageSelected(event){
+  const file = (event.target && event.target.files && event.target.files[0]) || null;
+  if (!file){
+    state.pendingImage = null;
+    updatePendingImageUI();
+    return;
+  }
+  if (file.size > IMAGE_TOTAL_MAX_BYTES){
+    toast('Image too large (limit 8MB)', false);
+    if (els.imageInput) els.imageInput.value = '';
+    removePendingImage();
+    return;
+  }
+  if (file.size >= IMAGE_WARN_THRESHOLD_BYTES){
+    const mb = (file.size / (1024 * 1024)).toFixed(2);
+    toast(`Warning: large image (${mb} MB). Limit is 8 MB.`, true);
+  }
+  const reader = new FileReader();
+  reader.onload = () => {
+    const dataUrl = reader.result;
+    if (!dataUrl || typeof dataUrl !== 'string'){
+      toast('Could not read image', false);
+      return;
+    }
+    const base64 = dataUrl.split(',')[1] || '';
+    const chunkCount = chunkBase64(base64).length;
+    state.pendingImage = {
+      name: file.name || 'image',
+      type: file.type || 'application/octet-stream',
+      base64,
+      chunkCount,
+      size: file.size,
+      previewUrl: dataUrl,
+    };
+    updatePendingImageUI();
+  };
+  reader.onerror = () => toast('Failed to read image', false);
+  reader.readAsDataURL(file);
+}
+
+function removePendingImage(){
+  state.pendingImage = null;
+  if (els.imageInput) els.imageInput.value = '';
+  updatePendingImageUI();
+}
+
+function updatePendingImageUI(){
+  if (!els.imageChip) return;
+  if (state.pendingImage){
+    els.imageChip.classList.remove('hidden');
+    if (els.imageChipLabel) {
+      const sizeKb = state.pendingImage.size ? Math.round(state.pendingImage.size / 1024) : '';
+      const labelParts = [
+        state.pendingImage.name || 'image',
+        sizeKb ? `${sizeKb} KB` : '',
+        state.pendingImage.chunkCount ? `${state.pendingImage.chunkCount} chunks` : ''
+      ].filter(Boolean);
+      els.imageChipLabel.textContent = labelParts.join(' · ');
+    }
+  } else {
+    els.imageChip.classList.add('hidden');
+  }
+}
+
+const IMAGE_CHUNK_MAX_BYTES = 60 * 1024; // keep under RTC send limits
+const IMAGE_TOTAL_MAX_BYTES = 8 * 1024 * 1024;
+const IMAGE_WARN_THRESHOLD_BYTES = 7.5 * 1024 * 1024;
+
+function logUploadChecklist(uploadId, job){
+  const steps = [];
+  if (!state.currentCapabilities.supports_images) steps.push('model lacks image support');
+  if (!job) steps.push('no upload job');
+  if (!state.pendingImage && !job?.previewUrl) steps.push('no pending image selected');
+  if (!requireRelay(false)) steps.push('relay not configured');
+  if (!state.nkn.ready) steps.push('NKN not connected');
+  if (job && job.chunks?.length){
+    steps.push(`chunks=${job.chunks.length}`);
+    const base64Len = state.pendingImage?.base64?.length || 0;
+    steps.push(`b64_len=${base64Len}`);
+  }
+  const label = uploadId ? `upload ${uploadId}` : 'upload';
+  logActivity(`[${label}] checklist: ${steps.join(' · ') || 'ready'}`);
+  if (steps.length) {
+    toast(`Upload checklist: ${steps.join(', ')}`, false);
+  }
+}
+
+function chunkBase64(str, maxChunkBytes = IMAGE_CHUNK_MAX_BYTES){
+  const chunks = [];
+  let idx = 0;
+  let i = 0;
+  const total = Math.ceil(str.length / maxChunkBytes);
+  while (idx < str.length){
+    chunks.push({ i, t: total, data: str.substring(idx, idx + maxChunkBytes) });
+    idx += maxChunkBytes;
+    i += 1;
+  }
+  return chunks;
+}
+
 async function handleSend(event){
   event.preventDefault();
   if (state.pendingSend) return;
@@ -2144,6 +2649,43 @@ async function handleSend(event){
     if (state.busy) return;
     const text = (els.input.value || '').trim();
     if (!text) return;
+    const caps = state.currentCapabilities || {};
+    let imageUploadId = null;
+    let pendingImageInfo = state.pendingImage ? { ...state.pendingImage } : null;
+    let uploadJob = null;
+    if (caps.supports_images && state.pendingImage){
+      const uploadId = generateMessageId();
+      const chunks = chunkBase64(state.pendingImage.base64);
+      uploadJob = {
+        id: uploadId,
+        chunks,
+        acknowledged: new Array(chunks.length).fill(false),
+        mime: state.pendingImage.type || 'application/octet-stream',
+        name: state.pendingImage.name || 'image',
+        previewUrl: state.pendingImage.previewUrl || '',
+        size: state.pendingImage.size || 0,
+        inFlight: false,
+        failureNoted: false,
+      };
+      state.uploadJobs.set(uploadId, uploadJob);
+      addUploadStatus(uploadId, chunks.length, state.pendingImage.name, uploadJob.previewUrl);
+      logUploadChecklist(uploadId, uploadJob);
+      try {
+        logActivity(`[upload ${uploadId}] initiating image upload (${chunks.length} chunks)`);
+        await uploadMissingChunks(uploadId);
+        imageUploadId = uploadId;
+        removePendingImage();
+      } catch (err){
+        uploadJob.failureNoted = true;
+        failUploadStatus(uploadId, err.message || 'Upload failed', { onRetry: () => retryUpload(uploadId) });
+        renderUploadFailureMessage(err.message || 'Image upload failed.', uploadId);
+        cancelUploadGuard(uploadId);
+        const cleanupTimer = setTimeout(() => clearUploadTracking(uploadId, { removeStatus: true }), 12000);
+        state.uploadGuards.set(uploadId, cleanupTimer);
+        setBusy(false);
+        return;
+      }
+    }
     els.input.value = '';
 
     // Add user message with unique ID to prevent duplicates
@@ -2167,17 +2709,31 @@ async function handleSend(event){
     };
     state.messages.push(assistantMessage);
     setBusy(true);
+    if (imageUploadId) {
+      registerUploadGuard(imageUploadId, assistantMsgId);
+    }
 
     // Start typing animation for this assistant message
     startTypingAnimation(assistantBody, assistantMsgId);
     const modelLabel = getModelLabel();
     setModelStatus('loading', { model: modelLabel, description: `Loading ${modelLabel}…` });
     let streamingNoted = false;
+    const cancelUploadTimeout = () => {
+      if (imageUploadId) {
+        cancelUploadGuard(imageUploadId);
+      }
+    };
+    const cleanupUpload = (opts = {}) => {
+      if (imageUploadId) {
+        clearUploadTracking(imageUploadId, opts);
+      }
+    };
 
     const handlers = {
       onDelta(delta, seq, batchSize){
         if (!streamingNoted){
           streamingNoted = true;
+          cancelUploadTimeout();
           if (state.modelStatus.phase !== 'streaming'){
             setModelStatus('streaming', { model: modelLabel });
           }
@@ -2229,6 +2785,7 @@ async function handleSend(event){
         assistantMessage.is_complete = false;
       },
       onDone(totalSeq, finalContent){
+        cancelUploadTimeout();
         // Apply any buffered out-of-order deltas before finalizing
         if (deltaBuffer.size > 0) {
           const pendingSeqs = Array.from(deltaBuffer.keys()).sort((a, b) => a - b);
@@ -2279,6 +2836,7 @@ async function handleSend(event){
         if (state.modelStatus.phase !== 'idle'){
           setModelStatus('idle', { model: modelLabel });
         }
+        cleanupUpload({ removeStatus: true, delayMs: 400 });
 
         // Do final DB refresh to ensure we're in sync (merge, don't replace)
         nknSendRequestWithRetry({ event: 'chat.refresh' }, { maxAttempts: 1, timeoutMs: 5000 })
@@ -2300,7 +2858,12 @@ async function handleSend(event){
           .catch(err => console.warn('Final refresh failed:', err));
       },
       onError(err, isPartial){
+        cancelUploadTimeout();
+        cleanupUpload({ removeStatus: true });
         const errMsg = err && err.message ? err.message : (typeof err === 'string' ? err : '');
+        if (imageUploadId) {
+          renderUploadFailureMessage(errMsg || 'Upload failed before chat started.', imageUploadId);
+        }
         const isAuthError = typeof errMsg === 'string' && /not_authenticated/i.test(errMsg);
         if (isAuthError){
           stopTyping();
@@ -2384,11 +2947,18 @@ async function handleSend(event){
       }
     };
 
-    streamViaNkn({
+    const payload = {
       message: text,
       user_uuid: userMsgId,
-      assistant_uuid: assistantMsgId
-    }, handlers);
+      assistant_uuid: assistantMsgId,
+      thinking: caps.supports_thinking ? state.thinkingEnabled : false
+    };
+    if (imageUploadId){
+      payload.image_upload_id = imageUploadId;
+      payload.image_mime = pendingImageInfo?.type || '';
+      payload.image_name = pendingImageInfo?.name || 'image';
+    }
+    streamViaNkn(payload, handlers);
   } finally {
     state.pendingSend = false;
   }
@@ -2501,6 +3071,9 @@ function handleNknMessage(src, payload){
   if (!ctx) {
     if (event === 'model.status'){
       applyModelStatusEvent(data);
+    } else if (event === 'image.upload.ack'){
+      // unsolicited ack; ignore
+      logActivity(`DM ← image.upload.ack unsolicited upload_id=${data.upload_id || data.uploadId || 'unknown'} received=${data.received} total=${data.total}`);
     }
     // Return false - message not for us
     return false;
@@ -2526,6 +3099,13 @@ function handleNknMessage(src, payload){
         ctx.handlers.onStatus(data);
       } else {
         applyModelStatusEvent(data);
+      }
+    } else if (event === 'image.ready'){
+      // optional hook if backend sends it
+      const uploadId = data.upload_id || data.uploadId;
+      if (uploadId){
+        cancelUploadGuard(uploadId);
+        completeUploadStatus(uploadId);
       }
     }
   } else if (ctx.kind === 'request'){
@@ -2720,6 +3300,8 @@ function init(){
   syncRelayInputs();
   renderHistory();
   updateSessionUI();
+  updateToolVisibility();
+  updatePendingImageUI();
 
   // Auto-login will happen in checkRelay() after NKN connects
 }
@@ -2885,6 +3467,22 @@ els.logoutBtn.addEventListener('click', handleLogout);
 els.form.addEventListener('submit', handleSend);
 els.showRegisterBtn.addEventListener('click', showRegisterForm);
 els.showLoginBtn.addEventListener('click', showLoginForm);
+if (els.attachImageBtn && els.imageInput){
+  els.attachImageBtn.addEventListener('click', () => {
+    if (state.currentCapabilities.supports_images){
+      els.imageInput.click();
+    } else {
+      toast('Current model does not support images', false);
+    }
+  });
+  els.imageInput.addEventListener('change', handleImageSelected);
+}
+if (els.removeImageBtn) els.removeImageBtn.addEventListener('click', removePendingImage);
+if (els.thinkingToggle){
+  els.thinkingToggle.addEventListener('change', (e) => {
+    state.thinkingEnabled = !!e.target.checked;
+  });
+}
 if (els.modelStatusPill){
   els.modelStatusPill.setAttribute('tabindex', '0');
   els.modelStatusPill.addEventListener('click', (e) => {

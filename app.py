@@ -61,6 +61,116 @@ _bootstrap_venv_if_needed()
 
 import codecs
 import requests
+import base64
+
+def infer_capabilities_from_name(name: str) -> Dict[str, bool]:
+    """Heuristic capability detection for models based on name."""
+    lowered = (name or "").lower()
+    supports_images = any(
+        key in lowered
+        for key in [
+            "vision",
+            "vl",
+            "clip",
+            "llava",
+            "vmodel",
+            "gpt-4o",
+            "vision-",
+            "mm",
+            "multimodal",
+            "moondream",
+            "idefics",
+            "qwen-vl",
+        ]
+    )
+    supports_thinking = any(
+        key in lowered
+        for key in [
+            "think",
+            "deepseek",
+            "reason",
+            "qwen2.5",
+            "qwen2.5-thinking",
+            "thinking",
+        ]
+    )
+    return {"supports_images": supports_images, "supports_thinking": supports_thinking}
+
+
+def infer_capabilities(name: str, details: Optional[Dict[str, Any]] = None) -> Dict[str, bool]:
+    """Merge name-based and metadata-based capability hints."""
+    caps = infer_capabilities_from_name(name)
+    meta = details or {}
+    meta_caps = meta.get("capabilities") or meta.get("capability") or []
+    if isinstance(meta_caps, str):
+        meta_caps = [meta_caps]
+    family_fields: List[str] = []
+    for key in ("family", "model_type"):
+        if meta.get(key):
+            family_fields.append(str(meta[key]))
+    if isinstance(meta.get("families"), list):
+        family_fields.extend([str(f) for f in meta.get("families") if f])
+    meta_tokens = [str(x).lower() for x in meta_caps] + [f.lower() for f in family_fields]
+    if any(tok in ("vision", "image", "images", "multimodal", "vl", "mm") or "vision" in tok for tok in meta_tokens):
+        caps["supports_images"] = True
+    if any(tok in ("thinking", "think", "reason", "reasoning") for tok in meta_tokens):
+        caps["supports_thinking"] = True
+    return caps
+
+
+def assemble_image_chunks(chunks: List[Any], default_mime: str = "") -> Tuple[Optional[str], Optional[str]]:
+    """Reassemble chunked base64 image payloads; returns (b64, error)."""
+    if not chunks:
+        return None, None
+    b64_data = ""
+    if isinstance(chunks[0], dict):
+        shards = []
+        for sh in chunks:
+            if not isinstance(sh, dict):
+                return None, "Invalid image chunk format"
+            try:
+                idx = int(sh.get("i", 0))
+                total = int(sh.get("t", 0))
+            except Exception:
+                return None, "Invalid image chunk indices"
+            data = sh.get("data") or sh.get("chunk") or sh.get("c")
+            if not isinstance(data, str) or not data:
+                return None, "Missing image chunk data"
+            if len(data) > IMAGE_CHUNK_MAX_BYTES * 2:  # guard per-chunk envelope
+                return None, "Image chunk exceeds size limit"
+            shards.append((idx, total, data))
+        shards.sort(key=lambda s: s[0])
+        if shards and shards[0][0] != 0:
+            return None, "Image chunks missing start chunk"
+        declared_total = shards[0][1] if shards else 0
+        if declared_total and declared_total != len(shards):
+            return None, f"Image chunks incomplete ({len(shards)}/{declared_total})"
+        # check contiguity
+        for expected_idx, (idx, _, _) in enumerate(shards):
+            if idx != expected_idx:
+                return None, f"Image chunks missing index {expected_idx}"
+        total_base64_len = sum(len(data) for _, _, data in shards)
+        if total_base64_len > IMAGE_TOTAL_MAX_BYTES * 1.5:
+            return None, "Image too large"
+        b64_data = "".join(data for _, _, data in shards)
+    else:
+        parts = [c for c in chunks if isinstance(c, str)]
+        if not parts:
+            return None, "Invalid image chunk data"
+        total_base64_len = sum(len(p) for p in parts)
+        if total_base64_len > IMAGE_TOTAL_MAX_BYTES * 1.5:
+            return None, "Image too large"
+        b64_data = "".join(parts)
+
+    if not b64_data:
+        return None, "Empty image payload"
+    try:
+        raw = base64.b64decode(b64_data, validate=True)
+    except Exception:
+        return None, "Invalid base64 image data"
+    if len(raw) > IMAGE_TOTAL_MAX_BYTES:
+        return None, "Image exceeds size limit"
+    return b64_data, None
 
 # === App configuration ======================================================
 
@@ -76,6 +186,9 @@ OLLAMA_STREAM_CHUNK_B = int(os.environ.get("OLLAMA_STREAM_CHUNK_B", str(16 * 102
 OLLAMA_HEARTBEAT_S = int(os.environ.get("OLLAMA_HEARTBEAT_S", "10"))
 MAX_CONTEXT_MESSAGES = int(os.environ.get("MAX_CONTEXT", "30"))
 MAX_MESSAGE_LENGTH = 4000
+IMAGE_CHUNK_MAX_BYTES = 250 * 1024  # keep well under 1MB per packet
+IMAGE_TOTAL_MAX_BYTES = 8 * 1024 * 1024  # safety cap per message
+PENDING_IMAGE_TTL_S = 10 * 60  # expire uploads after 10 minutes
 
 DATABASE_PATH = BASE_DIR / "chat.db"
 SQLITE_FOREIGN_KEYS_ON = "PRAGMA foreign_keys = ON;"
@@ -786,7 +899,8 @@ class OllamaClient:
                 continue
             name = item.get("name")
             if name:
-                result.append({"name": name, "details": item})
+                caps = infer_capabilities(name, item.get("details") or {})
+                result.append({"name": name, "details": item, "capabilities": caps})
         return result
 
 
@@ -1112,12 +1226,26 @@ class NKNRelayServer:
         self._model_warmed: Dict[str, bool] = {}
         self._default_model = OLLAMA_MODEL_NAME
         self._hardware_stop = threading.Event()
+        self._pending_images: Dict[str, Dict[str, Any]] = {}  # upload_id -> {b64, mime, name, ts, chunks}
         self._nvidia_smi_path = shutil.which("nvidia-smi")
         if not self._nvidia_smi_path:
             print("[hardware] nvidia-smi not found; GPU stats disabled")
         self._hardware_thread = threading.Thread(target=self._hardware_loop, daemon=True)
         self._hardware_thread.start()
         bridge.register_listener(self._handle_message)
+
+    def _prune_expired_uploads(self) -> int:
+        """Remove stale pending image uploads to prevent unbounded growth."""
+        now = time.time()
+        cutoff = now - PENDING_IMAGE_TTL_S
+        removed = 0
+        for key, entry in list(self._pending_images.items()):
+            if entry.get("ts", 0) < cutoff:
+                self._pending_images.pop(key, None)
+                removed += 1
+        if removed:
+            print(f"[image] Pruned {removed} expired uploads")
+        return removed
 
     def _send(self, to_addr: str, payload: Dict[str, Any]) -> None:
         with contextlib.suppress(Exception):
@@ -1216,6 +1344,15 @@ class NKNRelayServer:
         if src and src not in self._known_clients:
             self._known_clients.add(src)
             print(f"[nkn] new client {src} (total={len(self._known_clients)})")
+        if event == "image.upload":
+            upload_id = payload.get("upload_id")
+            try:
+                idx = int(payload.get("i", -1))
+                total = int(payload.get("t", -1))
+            except Exception:
+                idx, total = -1, -1
+            data_len = len(payload.get("data") or "")
+            print(f"[image] recv chunk upload_id={upload_id} idx={idx+1}/{total} data_len={data_len}")
         if event == "relay.info":
             self._reply(
                 src,
@@ -1260,6 +1397,9 @@ class NKNRelayServer:
             return
         if event == "models.list":
             self._handle_models_list(src, payload)
+            return
+        if event == "image.upload":
+            self._handle_image_upload(src, payload)
             return
         if event == "chat.abort":
             req_id = payload.get("id")
@@ -1655,6 +1795,70 @@ class NKNRelayServer:
             return
         self._reply(src, req_id, "models.list", models=models)
 
+    def _handle_image_upload(self, src: str, payload: Dict[str, Any]) -> None:
+        """Accept chunked image uploads over DM prior to chat.begin."""
+        req_id = payload.get("id")
+        upload_id = payload.get("upload_id") or ""
+        if not upload_id:
+            self._reply(src, req_id, "image.upload.error", error="upload_id required")
+            return
+        self._prune_expired_uploads()
+        try:
+            idx = int(payload.get("i", 0))
+            total = int(payload.get("t", 0))
+        except Exception:
+            self._reply(src, req_id, "image.upload.error", error="invalid indices")
+            return
+        if total <= 0 or idx < 0 or idx >= total:
+            self._reply(src, req_id, "image.upload.error", error="invalid chunk index")
+            return
+        data = payload.get("data")
+        if not isinstance(data, str) or not data:
+            self._reply(src, req_id, "image.upload.error", error="missing data")
+            return
+        if len(data) > IMAGE_CHUNK_MAX_BYTES * 2:
+            self._reply(src, req_id, "image.upload.error", error="chunk too large")
+            return
+
+        entry = self._pending_images.get(upload_id)
+        now = time.time()
+        if entry is None:
+            entry = {"chunks": [None] * total, "received": 0, "ts": now, "mime": payload.get("mime") or "", "name": payload.get("name") or ""}
+            self._pending_images[upload_id] = entry
+        elif entry.get("ts", 0) < now - PENDING_IMAGE_TTL_S:
+            self._pending_images.pop(upload_id, None)
+            self._reply(src, req_id, "image.upload.error", error="upload expired; please re-upload")
+            return
+        if idx >= len(entry["chunks"]):
+            self._reply(src, req_id, "image.upload.error", error="chunk index out of range")
+            return
+        if entry["chunks"][idx] is None:
+            entry["received"] += 1
+        entry["chunks"][idx] = data
+        entry["mime"] = payload.get("mime") or entry["mime"]
+        entry["name"] = payload.get("name") or entry["name"]
+        entry["ts"] = now
+        complete = entry["received"] == len(entry["chunks"])
+        print(
+            f"[image] stored chunk upload_id={upload_id} idx={idx+1}/{total} recv={entry['received']}/{len(entry['chunks'])} complete={complete}"
+        )
+        self._reply(src, req_id, "image.upload.ack", upload_id=upload_id, received=entry["received"], total=len(entry["chunks"]), complete=complete)
+        if complete:
+            b64_data = "".join(c or "" for c in entry["chunks"])
+            decoded = None
+            try:
+                decoded = base64.b64decode(b64_data, validate=True)
+            except Exception:
+                self._reply(src, None, "image.upload.error", error="invalid base64", upload_id=upload_id)
+                self._pending_images.pop(upload_id, None)
+                return
+            if len(decoded) > IMAGE_TOTAL_MAX_BYTES:
+                self._reply(src, None, "image.upload.error", error="image too large", upload_id=upload_id)
+                self._pending_images.pop(upload_id, None)
+                return
+            entry["b64"] = b64_data
+            print(f"[image] upload complete id={upload_id} bytes={len(decoded)} mime={entry['mime'] or 'unknown'}")
+
     def _handle_chat_begin(self, src: str, payload: Dict[str, Any]) -> None:
         req_id = payload.get("id") or f"dm-{int(time.time() * 1000)}"
         session = self._sessions.get(src)
@@ -1664,6 +1868,11 @@ class NKNRelayServer:
             return
         user_id, username, session_id = session
         model_name = self._db.get_session_model(session_id)
+        image_chunks = payload.get("image_chunks") or []
+        image_upload_id = payload.get("image_upload_id") or ""
+        image_mime = payload.get("image_mime") or ""
+        thinking_enabled = bool(payload.get("thinking"))
+        self._prune_expired_uploads()
 
         # Refresh session timestamp on activity
         self._sessions.refresh(src)
@@ -1673,6 +1882,27 @@ class NKNRelayServer:
             self._reply(src, req_id, "chat.error", error="empty_message")
             return
         text = text[:MAX_MESSAGE_LENGTH]
+        image_b64 = ""
+        if image_upload_id:
+            pending = self._pending_images.pop(image_upload_id, None)
+            cutoff = time.time() - PENDING_IMAGE_TTL_S
+            if not pending or not pending.get("b64"):
+                self._reply(src, req_id, "chat.error", error="image upload not found")
+                return
+            if pending.get("ts", 0) < cutoff:
+                self._reply(src, req_id, "chat.error", error="image upload expired; please re-upload")
+                return
+            image_b64 = pending["b64"]
+            image_mime = pending.get("mime") or image_mime
+            print(f"[chat] Image attached from upload {image_upload_id} for req={req_id} user={username} size_b64={len(image_b64)} mime={image_mime or 'unknown'}")
+            self._reply(src, req_id, "image.ready", upload_id=image_upload_id)
+        elif image_chunks:
+            image_b64, img_err = assemble_image_chunks(image_chunks, image_mime)
+            if img_err:
+                self._reply(src, req_id, "chat.error", error=img_err)
+                print(f"[chat] Rejecting image payload for req={req_id}: {img_err}")
+                return
+            print(f"[chat] Image attached for req={req_id} user={username} size_b64={len(image_b64)} chunks={len(image_chunks)} mime={image_mime or 'unknown'}")
 
         # Extract UUIDs for duplicate prevention
         user_msg_uuid = payload.get("user_uuid")
@@ -1702,7 +1932,7 @@ class NKNRelayServer:
         )
         threading.Thread(
             target=self._serve_chat,
-            args=(src, req_id, user_id, session_id, text, user_msg_uuid, assistant_msg_uuid, model_name),
+            args=(src, req_id, user_id, session_id, text, user_msg_uuid, assistant_msg_uuid, model_name, image_b64, image_mime, thinking_enabled),
             daemon=True,
         ).start()
 
@@ -1712,7 +1942,7 @@ class NKNRelayServer:
             if evt:
                 evt.set()
 
-    def _serve_chat(self, src: str, req_id: str, user_id: int, session_id: int, message_text: str, user_msg_uuid: str = None, assistant_msg_uuid: str = None, model_name: Optional[str] = None) -> None:
+    def _serve_chat(self, src: str, req_id: str, user_id: int, session_id: int, message_text: str, user_msg_uuid: str = None, assistant_msg_uuid: str = None, model_name: Optional[str] = None, image_b64: str = "", image_mime: str = "", thinking: bool = False) -> None:
         cancel_flag = threading.Event()
         with self._lock:
             self._active[req_id] = cancel_flag
@@ -1734,7 +1964,12 @@ class NKNRelayServer:
         system_prompt = self._prompts.get_prompt()
         assembled: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
         assembled.extend(history)
-        assembled.append({"role": "user", "content": message_text})
+        user_message: Dict[str, Any] = {"role": "user", "content": message_text}
+        if image_b64:
+            user_message["images"] = [image_b64]
+        if thinking:
+            user_message["thinking"] = True
+        assembled.append(user_message)
         self._send(src, {"event": "chat.ack", "id": req_id, "model": model_name})
         is_warmed = self._model_warmed.get(model_name, False)
         status_phase = "loading" if not is_warmed else "idle"
