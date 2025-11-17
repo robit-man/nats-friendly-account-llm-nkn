@@ -293,6 +293,7 @@
       border: 1px solid var(--border-subtle);
       padding: 24px; display: flex; flex-direction: column; gap: 14px;
       box-shadow: none;
+      position: relative;
     }
     .chat-message { display: flex; flex-direction: column; gap: 4px; }
     .chat-message-user { align-items: flex-end; }
@@ -518,6 +519,28 @@
       padding: 6px 16px;
       font-size: 13px;
       box-shadow: none;
+    }
+    .scroll-resume-btn {
+      position: absolute;
+      bottom: 12px;
+      right: 12px;
+      z-index: 3;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: #0b1021;
+      color: #e5e7eb;
+      border: 1px solid rgba(255,255,255,0.12);
+      box-shadow: 0 6px 14px rgba(0,0,0,0.12);
+      font-size: 12px;
+      cursor: pointer;
+      transition: transform 0.15s ease, opacity 0.15s ease, box-shadow 0.15s ease;
+    }
+    .scroll-resume-btn:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 8px 18px rgba(0,0,0,0.16);
     }
     .btn {
       background: var(--accent);
@@ -1363,7 +1386,10 @@ const els = {
   sessionGpuUtilLabelInline: document.getElementById('session-gpu-util-label-small'),
   themeToggle: document.getElementById('theme-toggle'),
   themeToggleLabel: document.getElementById('theme-toggle-label'),
+  scrollResumeBtn: null,
 };
+const AUTO_SCROLL_THRESHOLD_PX = 120;
+let autoScrollEnabled = true;
 
 loadCachedModelCaps();
 loadCachedThumbs();
@@ -2060,6 +2086,60 @@ function adjustTextareaHeight(textarea){
   textarea.style.height = `${textarea.scrollHeight}px`;
 }
 
+function isChatNearBottom(threshold = AUTO_SCROLL_THRESHOLD_PX){
+  if (!els.chat) return true;
+  const distance = els.chat.scrollHeight - els.chat.clientHeight - els.chat.scrollTop;
+  return distance <= threshold;
+}
+
+function scrollChatToBottom(force = false){
+  if (!els.chat) return;
+  if (!force && !autoScrollEnabled) {
+    updateScrollButtonVisibility();
+    return;
+  }
+  els.chat.scrollTop = els.chat.scrollHeight;
+  if (force) autoScrollEnabled = true;
+  updateScrollButtonVisibility();
+}
+
+function updateScrollButtonVisibility(){
+  if (!els.scrollResumeBtn) return;
+  const shouldShow = !autoScrollEnabled;
+  els.scrollResumeBtn.classList.toggle('hidden', !shouldShow);
+}
+
+function ensureChatScrollButton(){
+  if (els.scrollResumeBtn || !els.chat) return;
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'scroll-resume-btn hidden';
+  btn.textContent = 'Jump to latest';
+  btn.addEventListener('click', () => {
+    autoScrollEnabled = true;
+    scrollChatToBottom(true);
+  });
+  els.scrollResumeBtn = btn;
+  els.chat.appendChild(btn);
+}
+
+function handleChatScroll(){
+  if (!els.chat) return;
+  if (isChatNearBottom(AUTO_SCROLL_THRESHOLD_PX / 2)){
+    autoScrollEnabled = true;
+  } else {
+    autoScrollEnabled = false;
+  }
+  updateScrollButtonVisibility();
+}
+
+function setupChatScrollHandling(){
+  ensureChatScrollButton();
+  if (els.chat){
+    els.chat.addEventListener('scroll', handleChatScroll);
+  }
+}
+
 function logActivity(text, ok=true){
   if (!els.activity) return;
   const line = document.createElement('div');
@@ -2461,7 +2541,7 @@ function renderBubble(role, content, messageId){
   wrapper.appendChild(meta);
   wrapper.appendChild(bubble);
   els.chat.appendChild(wrapper);
-  els.chat.scrollTop = els.chat.scrollHeight;
+  scrollChatToBottom();
   return body;
 }
 
@@ -2486,6 +2566,10 @@ function addReloadAction(body){
 
 function renderHistory(){
   displayedMessageContents.clear();
+  const scrollBtn = els.scrollResumeBtn && els.scrollResumeBtn.parentNode === els.chat ? els.scrollResumeBtn : null;
+  if (scrollBtn) {
+    scrollBtn.remove();
+  }
   els.chat.innerHTML = '';
   state.messages.forEach((msg) => {
     if (!msg || !msg.role) return;
@@ -2493,6 +2577,7 @@ function renderHistory(){
         const body = renderBubble('assistant', '', msg.id);
         renderMarkdown(body, msg.content || '');
         recordDisplayedMessageContent(msg.id, msg.content || '');
+        maybeTriggerTimeoutRefresh(msg.content || '', msg.id);
 
       // Show indicator and refresh button for incomplete messages
       if (msg.is_complete === false) {
@@ -2509,10 +2594,13 @@ function renderHistory(){
       renderBubble('user', msg.content || '', msg.id);
     }
   });
+  if (scrollBtn) {
+    els.chat.appendChild(scrollBtn);
+  }
   // Auto-scroll to bottom after rendering history
   // Use requestAnimationFrame to ensure DOM is fully updated, especially markdown rendering
   requestAnimationFrame(() => {
-    els.chat.scrollTop = els.chat.scrollHeight;
+    scrollChatToBottom();
   });
   if (typingAnimationActive && currentTypingMessageId) {
     const activeBubble = els.chat.querySelector(`[data-message-id="${currentTypingMessageId}"] .markdown-body`);
@@ -2611,10 +2699,23 @@ function setBusy(v){
 // Auto-refresh state
 let autoRefreshTimer = null;
 const displayedMessageContents = new Map();
+const timeoutRefreshTriggered = new Set();
 
 function recordDisplayedMessageContent(messageId, text) {
   if (!messageId) return;
   displayedMessageContents.set(messageId, text || '');
+}
+
+function maybeTriggerTimeoutRefresh(content, messageId){
+  const text = (content || '').toLowerCase();
+  if (!text) return;
+  const matches = text.includes('failed to send with any client') || text.includes('message timeout');
+  if (!matches) return;
+  const key = messageId || text;
+  if (timeoutRefreshTriggered.has(key)) return;
+  timeoutRefreshTriggered.add(key);
+  logActivity('Detected timeout in chat bubble, refreshing DB state...');
+  window.refreshIncompleteMessage('auto');
 }
 
 // Typing animation state
@@ -2676,7 +2777,7 @@ async function typeChunk(chunk) {
   currentTypingText += chunk;
   renderMarkdown(currentTypingNode, currentTypingText);
   recordDisplayedMessageContent(currentTypingMessageId, currentTypingText);
-  els.chat.scrollTop = els.chat.scrollHeight;
+  scrollChatToBottom();
   await revealChunkAnimation();
 }
 
@@ -2710,7 +2811,7 @@ function queueTypingChunk(chunk) {
 function setTypingPlaceholder(text, includeInTyping = false) {
   if (!currentTypingNode) return;
   renderMarkdown(currentTypingNode, text);
-  els.chat.scrollTop = els.chat.scrollHeight;
+  scrollChatToBottom();
   if (includeInTyping) {
     currentTypingText = text;
     recordDisplayedMessageContent(currentTypingMessageId, currentTypingText);
@@ -3006,7 +3107,7 @@ function addUploadStatus(uploadId, totalChunks, fileLabel, thumbnailUrl){
   wrapper.appendChild(meta);
   wrapper.appendChild(bubble);
   els.chat.appendChild(wrapper);
-  els.chat.scrollTop = els.chat.scrollHeight;
+  scrollChatToBottom();
   state.uploadStatuses.set(uploadId, { wrapper, bubble, progress: bubble.querySelector(`#upload-progress-${uploadId}`), total: totalChunks, statusIcon: bubble.querySelector('.status-icon'), retryBtn: null, messageEl: null });
 }
 
@@ -3435,6 +3536,7 @@ function handleToolCallsEvent(toolCalls){
   const body = renderBubble('assistant', '', generateMessageId());
   const content = `*Model requested tool call(s):*\n${summaries.join('\n')}\n\n_Tool execution is not automated; run the requested tool manually._`;
   renderMarkdown(body, content);
+  maybeTriggerTimeoutRefresh(content, null);
 }
 
 const IMAGE_CHUNK_MAX_BYTES = 60 * 1024; // keep under RTC send limits
@@ -4329,6 +4431,7 @@ function init(){
   prefillSavedCreds();
   bindChatInputEvents();
   ensureInputModeMatchesViewport();
+  setupChatScrollHandling();
   if (state.savedCreds){
     logActivity('Saved credentials loaded');
   }
