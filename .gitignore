@@ -1,0 +1,11 @@
+*.db
+*.md
+/docs/venv
+/docs/*.pem
+/docs/*.json
+__*
+.venv
+venv
+/nkn_bridge
+.nkn_bridge
+example*
