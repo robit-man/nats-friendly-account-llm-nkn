@@ -2727,9 +2727,12 @@ let currentTypingMessageId = null;
 let typingChunkInProgress = false;
 
 function startTypingAnimation(targetNode, messageId = null, initialText = '') {
-  if (typingAnimationActive) return; // Already typing
+  if (typingAnimationActive) {
+    stopTyping();
+  }
 
   typingAnimationActive = true;
+  typingQueue = [];
   currentTypingNode = targetNode;
   currentTypingText = initialText || '';
   currentTypingMessageId = messageId;
@@ -2846,6 +2849,8 @@ function stopTyping() {
   typingQueue = [];
   currentTypingMessageId = null;
   typingChunkInProgress = false;
+  currentTypingNode = null;
+  currentTypingText = '';
 }
 
 // Global function for incomplete message refresh
