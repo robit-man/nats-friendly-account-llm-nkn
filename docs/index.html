@@ -485,6 +485,8 @@
       position: relative;
       width: 100%;
       max-height: 100%;
+      line-height: 1;
+      display: flex;
     }
     .chat-input-field-control {
       width: 100%; min-height: 55px; border-radius: var(--radius-inner);
@@ -1940,10 +1942,22 @@ function handleChatInputInputEvent(){
 function handleChatInputKeydownEvent(event){
   if (isMobileViewport()) return;
   if (!els.input) return;
-  if (els.input.tagName.toLowerCase() === 'input' && (event.ctrlKey || event.metaKey) && event.key === 'Enter'){
+  const isTextarea = els.input.tagName.toLowerCase() === 'textarea';
+  const isInput = !isTextarea;
+  if (isInput && (event.ctrlKey || event.metaKey) && event.key === 'Enter'){
     event.preventDefault();
     upgradeChatInputToTextarea({ addNewline: true });
-  } else if (els.input.tagName.toLowerCase() === 'textarea' && event.key === 'Backspace'){
+  } else if (isTextarea && (event.ctrlKey || event.metaKey) && event.key === 'Enter'){
+    event.preventDefault();
+    if (els.form){
+      if (typeof els.form.requestSubmit === 'function'){
+        els.form.requestSubmit(els.sendBtn || undefined);
+      } else {
+        const submitEvent = new Event('submit', { cancelable: true, bubbles: true });
+        els.form.dispatchEvent(submitEvent);
+      }
+    }
+  } else if (isTextarea && event.key === 'Backspace'){
     // After the key event, see if we can shrink back to input
     setTimeout(() => maybeDowngradeTextarea(), 0);
   }
@@ -2487,7 +2501,7 @@ function renderHistory(){
         const isAutoRefreshing = autoRefreshTimer !== null;
         incomplete.innerHTML = `
           <span>${isAutoRefreshing ? '🔄' : '⚠️'} ${isAutoRefreshing ? 'Auto-recovering...' : 'Incomplete (connection interrupted)'}</span>
-          <button onclick="refreshIncompleteMessage('${msg.id}')" style="padding: 2px 8px; background: var(--text-muted); border: 1px solid var(--border-subtle); border-radius: 0.5rem; cursor: pointer; font-size: 10px; font-weight: 600; color: var(--text-main);">Refresh Now</button>
+          <button onclick="refreshIncompleteMessage('${msg.id}')" style="padding: 2px 8px; background: var(--bg-panel); border: 1px solid var(--border-subtle); border-radius: 0.5rem; cursor: pointer; font-size: 10px; font-weight: 600; color: var(--);">Refresh Now</button>
         `;
         body.parentElement.appendChild(incomplete);
       }
