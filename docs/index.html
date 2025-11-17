@@ -631,8 +631,8 @@
       transform: translateY(-1px);
     }
     .model-card.active {
-      border-color: #111827;
-      background: #e5e7eb;
+      border-color: var(--text-main);
+      background: var(--bubble-user);
     }
     .model-card-title { font-weight: 700; color: var(--text-main); }
     .model-card-meta { font-size: 12px; color: var(--text-muted); }
@@ -779,7 +779,7 @@
         display: none;
       }
       .session-bar {
-        align-items: flex-start;
+        justify-content:flex-start;
       }
       .session-bar .model-metrics {
         order: 4;
@@ -854,7 +854,7 @@
   <div class="chat-interface">
     <header class="app-header">
       <div>
-        <div class="app-header-title">INFERENCE</div>
+        <div class="app-header-title">INFER</div>
       </div>
       <div class="app-header-right">
           <span class="status-pill" id="nkn-status-chat">Connected</span>
@@ -934,7 +934,7 @@
               <button class="btn chat-input-submit" type="submit" id="send-btn" aria-label="Send message">↗</button>
             </div>
             <div class="chat-tools" id="chat-tools">
-              <div id="image-tool" class="tool images-tool">
+              <div id="image-tool" class="tool images-tool hidden">
                 <input type="file" id="image-input" accept="image/*" style="display:none">
                 <button type="button" class="tool-btn" id="attach-image-btn">Attach image</button>
                 <span class="chip hidden" id="image-chip">
@@ -1084,6 +1084,7 @@ const els = {
   modelGrid: document.getElementById('model-grid'),
   modelModalClose: document.getElementById('model-modal-close'),
   modelModalSub: document.getElementById('model-modal-sub'),
+  imageTool: document.getElementById('image-tool'),
   attachImageBtn: document.getElementById('attach-image-btn'),
   imageInput: document.getElementById('image-input'),
   imageChip: document.getElementById('image-chip'),
@@ -1285,7 +1286,10 @@ function syncCurrentModelFromState(modelHint){
   } else if (!state.selectedModel && state.relayInfo && state.relayInfo.model){
     state.selectedModel = state.relayInfo.model;
   }
-  state.currentCapabilities = getCapabilitiesForModel(state.selectedModel);
+  const caps = getCapabilitiesForModel(state.selectedModel);
+  // If cache/heuristics say images are supported, trust it on load
+  state.currentCapabilities = caps;
+  forceImageCapabilityFromSelectedModel();
   updateToolVisibility();
   updateModelDisplay();
 }
@@ -1330,6 +1334,7 @@ async function fetchAvailableModels(){
     persistCachedModelCaps();
     renderModelOptions();
     state.currentCapabilities = getCapabilitiesForModel(getModelLabel());
+    forceImageCapabilityFromSelectedModel();
     updateToolVisibility();
     return state.availableModels;
   } catch (err) {
@@ -1357,13 +1362,20 @@ function renderModelOptions(){
     const active = name === current ? 'active' : '';
     const capBadges = formatCapabilityBadges(model.capabilities);
     return `
-      <button type="button" class="model-card ${active}" data-model="${name}">
+      <button type="button" class="model-card ${active}" data-model="${name}" data-supports-images="${model.capabilities?.supports_images ? '1' : '0'}">
         <div class="model-card-title">${name}</div>
         <div class="model-card-meta">${metaText}</div>
         <div class="model-card-meta">${capBadges}</div>
       </button>
     `;
   }).join('');
+
+  // If current model card advertises images, ensure capability is set before visibility update
+  const activeCard = els.modelGrid.querySelector('.model-card.active');
+  if (activeCard && activeCard.dataset.supportsImages === '1'){
+    state.currentCapabilities.supports_images = true;
+  }
+  updateToolVisibility();
 
   els.modelGrid.querySelectorAll('.model-card').forEach((card) => {
     const targetModel = card.dataset.model;
@@ -1401,8 +1413,13 @@ function updateModelModalSub(){
 
 async function handleModelSelect(modelName){
   try {
+    const card = document.querySelector(`.model-card[data-model="${modelName}"]`);
+    const supportsImages = card ? card.dataset.supportsImages === '1' : false;
     await setSessionModel(modelName);
     state.currentCapabilities = getCapabilitiesForModel(modelName);
+    if (supportsImages) {
+      state.currentCapabilities.supports_images = true;
+    }
     persistCachedModelCaps();
     updateToolVisibility();
     closeModelModal();
@@ -2750,9 +2767,21 @@ function mergeMessages(localMessages, dbMessages){
 }
 
 function updateToolVisibility(){
+  const modelName = getModelLabel();
   const caps = state.currentCapabilities || {};
+  const entry = (state.availableModels || []).find((m) => m.name === modelName);
+  const supportsImages = caps.supports_images || (entry && entry.capabilities && entry.capabilities.supports_images) || (state.modelCapsCache.get(modelName || '') || {}).supports_images;
+  const showImages = !!supportsImages;
   if (els.imageTool){
-    els.imageTool.classList.toggle('hidden', !caps.supports_images);
+    els.imageTool.classList.toggle('hidden', !showImages);
+    if (showImages) els.imageTool.classList.remove('hidden');
+    if (els.attachImageBtn){
+      els.attachImageBtn.disabled = !showImages;
+      els.attachImageBtn.classList.toggle('hidden', !showImages);
+      if (showImages) els.attachImageBtn.classList.remove('hidden');
+    }
+    if (els.imageInput) els.imageInput.disabled = !showImages;
+    if (!showImages) removePendingImage();
   }
   if (els.thinkingChip){
     els.thinkingChip.classList.toggle('hidden', !caps.supports_thinking);
@@ -2760,6 +2789,14 @@ function updateToolVisibility(){
       state.thinkingEnabled = false;
       if (els.thinkingToggle) els.thinkingToggle.checked = false;
     }
+  }
+}
+
+function forceImageCapabilityFromSelectedModel(){
+  const modelName = getModelLabel();
+  const entry = (state.availableModels || []).find((m) => m.name === modelName);
+  if (entry && entry.capabilities && entry.capabilities.supports_images){
+    state.currentCapabilities = { ...state.currentCapabilities, supports_images: true };
   }
 }
 
