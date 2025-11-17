@@ -857,7 +857,13 @@ class OllamaClient:
         self._timeout = timeout_s
         self._keep_alive = keep_alive
 
-    def stream(self, messages: List[Dict[str, str]], model_name: Optional[str] = None, tools: Optional[List[Dict[str, Any]]] = None) -> Iterable[Dict[str, Any]]:
+    def stream(
+        self,
+        messages: List[Dict[str, str]],
+        model_name: Optional[str] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        think: Optional[bool] = None,
+    ) -> Iterable[Dict[str, Any]]:
         url = f"{self._base}{self._endpoint}"
         target_model = model_name or self._model
         payload: Dict[str, Any] = {
@@ -869,6 +875,8 @@ class OllamaClient:
             payload["tools"] = tools
         if self._keep_alive:
             payload["keep_alive"] = self._keep_alive
+        if think is not None:
+            payload["think"] = bool(think)
         response = requests.post(url, json=payload, timeout=self._timeout, stream=True)
         response.raise_for_status()
 
@@ -2176,8 +2184,6 @@ class NKNRelayServer:
         user_message: Dict[str, Any] = {"role": "user", "content": message_text}
         if image_b64:
             user_message["images"] = [image_b64]
-        if thinking:
-            user_message["thinking"] = True
         assembled.append(user_message)
         self._send(src, {"event": "chat.ack", "id": req_id, "model": model_name})
         is_warmed = self._model_warmed.get(model_name, False)
@@ -2264,7 +2270,7 @@ class NKNRelayServer:
                 print(f"[chat] Progressive save: {len(accumulated)} chars, seq={seq_num}")
 
         try:
-            for packet in self._ollama.stream(assembled, model_name=model_name, tools=tools):
+            for packet in self._ollama.stream(assembled, model_name=model_name, tools=tools, think=thinking):
                 if cancel_flag.is_set():
                     break
                 if packet.get("keepalive"):
