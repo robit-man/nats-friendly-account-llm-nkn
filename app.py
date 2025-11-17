@@ -310,6 +310,7 @@ class Database:
                     model TEXT NOT NULL DEFAULT '{default_model_sql}',
                     role TEXT NOT NULL,
                     content TEXT NOT NULL,
+                    image_thumb TEXT,
                     uuid TEXT,
                     is_complete INTEGER DEFAULT 1,
                     last_seq INTEGER DEFAULT 0,
@@ -367,6 +368,16 @@ class Database:
                 self._connection.commit()
             except sqlite3.OperationalError:
                 pass
+
+            # Add image_thumb column for storing small previews
+            try:
+                cur.execute("ALTER TABLE messages ADD COLUMN image_thumb TEXT")
+                self._connection.commit()
+                message_cols.add("image_thumb")
+            except sqlite3.OperationalError:
+                pass
+
+            self._messages_has_thumb = "image_thumb" in message_cols
 
             # Add model column to chat_sessions if it doesn't exist
             try:
@@ -509,21 +520,25 @@ class Database:
             self._connection.commit()
             return cur.rowcount > 0
 
-    def append_message(self, user_id: int, session_id: int, role: str, content: str, uuid: str = None, model: Optional[str] = None) -> None:
+    def append_message(self, user_id: int, session_id: int, role: str, content: str, uuid: str = None, model: Optional[str] = None, image_thumb: Optional[str] = None) -> None:
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         model_name = model or OLLAMA_MODEL_NAME
         with self._lock:
             try:
+                columns = ["user_id", "session_id", "role", "content", "uuid", "created_at"]
+                values = [user_id, session_id, role, content, uuid, now]
                 if self._messages_has_model:
-                    self._connection.execute(
-                        "INSERT INTO messages (user_id, session_id, role, content, uuid, model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?);",
-                        (user_id, session_id, role, content, uuid, model_name, now),
-                    )
-                else:
-                    self._connection.execute(
-                        "INSERT INTO messages (user_id, session_id, role, content, uuid, created_at) VALUES (?, ?, ?, ?, ?, ?);",
-                        (user_id, session_id, role, content, uuid, now),
-                    )
+                    columns.insert(5, "model")
+                    values.insert(5, model_name)
+                if getattr(self, "_messages_has_thumb", False):
+                    columns.insert(-1, "image_thumb")
+                    values.insert(-1, image_thumb)
+                placeholders = ", ".join(["?"] * len(values))
+                col_sql = ", ".join(columns)
+                self._connection.execute(
+                    f"INSERT INTO messages ({col_sql}) VALUES ({placeholders});",
+                    tuple(values),
+                )
                 self._connection.commit()
             except sqlite3.IntegrityError as e:
                 # UUID already exists, skip duplicate insert
@@ -536,28 +551,22 @@ class Database:
 
     def get_recent_messages(self, user_id: int, session_id: int, limit: int) -> List[Dict[str, str]]:
         with self._lock:
+            select_cols = ["role", "content", "uuid", "is_complete", "last_seq"]
             if self._messages_has_model:
-                cur = self._connection.execute(
-                    """
-                    SELECT role, content, uuid, is_complete, last_seq, model
-                    FROM messages
-                    WHERE user_id = ? AND session_id = ?
-                    ORDER BY id ASC
-                    LIMIT ?;
-                    """,
-                    (user_id, session_id, limit),
-                )
-            else:
-                cur = self._connection.execute(
-                    """
-                    SELECT role, content, uuid, is_complete, last_seq
-                    FROM messages
-                    WHERE user_id = ? AND session_id = ?
-                    ORDER BY id ASC
-                    LIMIT ?;
-                    """,
-                    (user_id, session_id, limit),
-                )
+                select_cols.append("model")
+            if getattr(self, "_messages_has_thumb", False):
+                select_cols.append("image_thumb")
+            col_sql = ", ".join(select_cols)
+            cur = self._connection.execute(
+                f"""
+                SELECT {col_sql}
+                FROM messages
+                WHERE user_id = ? AND session_id = ?
+                ORDER BY id ASC
+                LIMIT ?;
+                """,
+                (user_id, session_id, limit),
+            )
             rows = cur.fetchall()
         return [
             {
@@ -567,6 +576,7 @@ class Database:
                 "is_complete": bool(row["is_complete"] if row["is_complete"] is not None else True),
                 "last_seq": row["last_seq"] if row["last_seq"] is not None else 0,
                 "model": row["model"] if "model" in row.keys() else OLLAMA_MODEL_NAME,
+                "image_thumb": row["image_thumb"] if "image_thumb" in row.keys() else None,
             }
             for row in rows
         ]
@@ -575,28 +585,22 @@ class Database:
         if not uuid:
             return None
         with self._lock:
+            select_cols = ["role", "content", "is_complete", "last_seq"]
             if self._messages_has_model:
-                cur = self._connection.execute(
-                    """
-                    SELECT role, content, is_complete, last_seq, model
-                    FROM messages
-                    WHERE uuid = ?
-                    ORDER BY id DESC
-                    LIMIT 1;
-                    """,
-                    (uuid,),
-                )
-            else:
-                cur = self._connection.execute(
-                    """
-                    SELECT role, content, is_complete, last_seq
-                    FROM messages
-                    WHERE uuid = ?
-                    ORDER BY id DESC
-                    LIMIT 1;
-                    """,
-                    (uuid,),
-                )
+                select_cols.append("model")
+            if getattr(self, "_messages_has_thumb", False):
+                select_cols.append("image_thumb")
+            col_sql = ", ".join(select_cols)
+            cur = self._connection.execute(
+                f"""
+                SELECT {col_sql}
+                FROM messages
+                WHERE uuid = ?
+                ORDER BY id DESC
+                LIMIT 1;
+                """,
+                (uuid,),
+            )
             row = cur.fetchone()
         if not row:
             return None
@@ -606,6 +610,7 @@ class Database:
             "is_complete": bool(row["is_complete"] if row["is_complete"] is not None else True),
             "last_seq": row["last_seq"] if row["last_seq"] is not None else 0,
             "model": row["model"] if "model" in row.keys() else OLLAMA_MODEL_NAME,
+            "image_thumb": row["image_thumb"] if "image_thumb" in row.keys() else None,
         }
 
     def update_last_nkn_addr(self, user_id: int, address: str) -> None:
@@ -1871,6 +1876,7 @@ class NKNRelayServer:
         image_chunks = payload.get("image_chunks") or []
         image_upload_id = payload.get("image_upload_id") or ""
         image_mime = payload.get("image_mime") or ""
+        image_thumb = payload.get("image_thumb") or ""
         thinking_enabled = bool(payload.get("thinking"))
         self._prune_expired_uploads()
 
@@ -1932,7 +1938,7 @@ class NKNRelayServer:
         )
         threading.Thread(
             target=self._serve_chat,
-            args=(src, req_id, user_id, session_id, text, user_msg_uuid, assistant_msg_uuid, model_name, image_b64, image_mime, thinking_enabled),
+            args=(src, req_id, user_id, session_id, text, user_msg_uuid, assistant_msg_uuid, model_name, image_b64, image_mime, image_thumb, thinking_enabled),
             daemon=True,
         ).start()
 
@@ -1942,7 +1948,7 @@ class NKNRelayServer:
             if evt:
                 evt.set()
 
-    def _serve_chat(self, src: str, req_id: str, user_id: int, session_id: int, message_text: str, user_msg_uuid: str = None, assistant_msg_uuid: str = None, model_name: Optional[str] = None, image_b64: str = "", image_mime: str = "", thinking: bool = False) -> None:
+    def _serve_chat(self, src: str, req_id: str, user_id: int, session_id: int, message_text: str, user_msg_uuid: str = None, assistant_msg_uuid: str = None, model_name: Optional[str] = None, image_b64: str = "", image_mime: str = "", image_thumb: str = "", thinking: bool = False) -> None:
         cancel_flag = threading.Event()
         with self._lock:
             self._active[req_id] = cancel_flag
@@ -1960,7 +1966,7 @@ class NKNRelayServer:
                 title += "..."
             self._db.update_session_title(session_id, title)
 
-        self._db.append_message(user_id, session_id, "user", message_text, uuid=user_msg_uuid, model=model_name)
+        self._db.append_message(user_id, session_id, "user", message_text, uuid=user_msg_uuid, model=model_name, image_thumb=image_thumb)
         system_prompt = self._prompts.get_prompt()
         assembled: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
         assembled.extend(history)

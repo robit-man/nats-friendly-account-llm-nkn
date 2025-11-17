@@ -353,11 +353,11 @@
 .upload-status .progress {
   font-weight: 600;
 }
-.upload-status .status-icon {
-  width: 16px;
-  height: 16px;
-  display: inline-block;
-}
+    .upload-status .status-icon {
+      width: 16px;
+      height: 16px;
+      display: inline-block;
+    }
 .upload-status.success { border-color: #22c55e; }
 .upload-status.error { border-color: #ef4444; color: #b91c1c; }
 .upload-meta {
@@ -386,6 +386,16 @@
 }
 .upload-retry-btn:hover {
   background: var(--bg-input);
+}
+.chat-thumb {
+  width: 120px;
+  height: auto;
+  max-height: 160px;
+  border-radius: 10px;
+  border: 1px solid var(--border-subtle);
+  display: block;
+  margin-bottom: 8px;
+  object-fit: contain;
 }
     .chip .remove {
       border: none;
@@ -940,6 +950,7 @@ const STORAGE_KEYS = {
   seed: 'inference.nkn.seed',
   legacySeed: 'loving.nkn.seed',
   modelCaps: 'inference.model.capabilities',
+  thumbs: 'inference.message.thumbs',
 };
 
 // Parse URL parameter for relay server endpoint
@@ -972,6 +983,7 @@ const state = {
   availableModels: [],
   currentCapabilities: { supports_images: false, supports_thinking: false },
   modelCapsCache: new Map(),
+  thumbsCache: new Map(),
   pendingImage: null,
   thinkingEnabled: false,
   uploadStatuses: new Map(),
@@ -1062,6 +1074,7 @@ const els = {
 };
 
 loadCachedModelCaps();
+loadCachedThumbs();
 
 function getCurrentSession(){
   return state.sessions.find((s) => s.id === state.currentSessionId) || null;
@@ -1088,6 +1101,40 @@ function persistCachedModelCaps(){
   try {
     localStorage.setItem(STORAGE_KEYS.modelCaps, JSON.stringify(obj));
   } catch (_) {}
+}
+
+function loadCachedThumbs(){
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.thumbs);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object'){
+      Object.entries(parsed).forEach(([id, dataUrl]) => {
+        if (id && dataUrl) state.thumbsCache.set(id, dataUrl);
+      });
+    }
+  } catch (_) {}
+}
+
+function persistCachedThumbs(){
+  const obj = {};
+  state.thumbsCache.forEach((dataUrl, id) => {
+    obj[id] = dataUrl;
+  });
+  try {
+    localStorage.setItem(STORAGE_KEYS.thumbs, JSON.stringify(obj));
+  } catch (_) {}
+}
+
+function cacheThumb(messageId, dataUrl){
+  if (!messageId || !dataUrl) return;
+  state.thumbsCache.set(messageId, dataUrl);
+  persistCachedThumbs();
+}
+
+function getCachedThumb(messageId){
+  if (!messageId) return null;
+  return state.thumbsCache.get(messageId) || null;
 }
 
 function getCapabilitiesForModel(modelName){
@@ -1834,13 +1881,23 @@ function renderBubble(role, content, messageId){
   meta.textContent = label;
   const bubble = document.createElement('div');
   bubble.className = `chat-bubble chat-bubble-${role}`;
+  const thumb = messageObj?.image_thumb || (messageId ? getCachedThumb(messageId) : null);
   let body = null;
   if (role === 'assistant'){
     body = document.createElement('div');
     body.className = 'markdown-body';
     bubble.appendChild(body);
   } else {
-    bubble.textContent = content;
+    if (thumb){
+      const img = document.createElement('img');
+      img.className = 'chat-thumb';
+      img.src = thumb;
+      img.alt = 'thumbnail';
+      bubble.appendChild(img);
+    }
+    const textNode = document.createElement('div');
+    textNode.textContent = content;
+    bubble.appendChild(textNode);
     recordDisplayedMessageContent(messageId, content);
   }
   wrapper.appendChild(meta);
@@ -2267,6 +2324,12 @@ function normalizeMessage(msg, fallbackModel){
   const normalized = { ...msg };
   if (!normalized.id) normalized.id = normalized.uuid || generateMessageId();
   normalized.model = normalized.model || fallbackModel || getModelLabel();
+  if (normalized.image_thumb) {
+    cacheThumb(normalized.id, normalized.image_thumb);
+  }
+  if (!normalized.image_thumb) {
+    normalized.image_thumb = getCachedThumb(normalized.id);
+  }
   return normalized;
 }
 
@@ -2550,6 +2613,8 @@ function mergeMessages(localMessages, dbMessages){
       // Update if DB version is more complete or has more content
       if (candidate.is_complete || (candidate.content && candidate.content.length > (existing.content || '').length)) {
         messageMap.set(candidate.id, { ...existing, ...candidate });
+      } else if (candidate.image_thumb && !existing.image_thumb){
+        messageMap.set(candidate.id, { ...existing, image_thumb: candidate.image_thumb });
       }
       return;
     }
@@ -2590,7 +2655,7 @@ function updateToolVisibility(){
   }
 }
 
-function handleImageSelected(event){
+async function handleImageSelected(event){
   const file = (event.target && event.target.files && event.target.files[0]) || null;
   if (!file){
     state.pendingImage = null;
@@ -2608,7 +2673,7 @@ function handleImageSelected(event){
     toast(`Warning: large image (${mb} MB). Limit is 8 MB.`, true);
   }
   const reader = new FileReader();
-  reader.onload = () => {
+  reader.onload = async () => {
     const dataUrl = reader.result;
     if (!dataUrl || typeof dataUrl !== 'string'){
       toast('Could not read image', false);
@@ -2616,6 +2681,12 @@ function handleImageSelected(event){
     }
     const base64 = dataUrl.split(',')[1] || '';
     const chunkCount = chunkBase64(base64).length;
+    let thumb = '';
+    try {
+      thumb = await createThumbnail(dataUrl);
+    } catch (err){
+      console.warn('thumb gen failed', err);
+    }
     state.pendingImage = {
       name: file.name || 'image',
       type: file.type || 'application/octet-stream',
@@ -2623,6 +2694,7 @@ function handleImageSelected(event){
       chunkCount,
       size: file.size,
       previewUrl: dataUrl,
+      thumb,
     };
     updatePendingImageUI();
   };
@@ -2657,6 +2729,39 @@ function updatePendingImageUI(){
 const IMAGE_CHUNK_MAX_BYTES = 60 * 1024; // keep under RTC send limits
 const IMAGE_TOTAL_MAX_BYTES = 8 * 1024 * 1024;
 const IMAGE_WARN_THRESHOLD_BYTES = 7.5 * 1024 * 1024;
+
+function createThumbnail(dataUrl, maxSize = 256, quality = 0.75){
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      let { width, height } = img;
+      if (width > height){
+        if (width > maxSize){
+          height = Math.round((height * maxSize) / width);
+          width = maxSize;
+        }
+      } else {
+        if (height > maxSize){
+          width = Math.round((width * maxSize) / height);
+          height = maxSize;
+        }
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        reject(new Error('canvas unavailable'));
+        return;
+      }
+      ctx.drawImage(img, 0, 0, width, height);
+      const thumb = canvas.toDataURL('image/jpeg', quality);
+      resolve(thumb);
+    };
+    img.onerror = () => reject(new Error('thumbnail failed'));
+    img.src = dataUrl;
+  });
+}
 
 function logUploadChecklist(uploadId, job){
   const steps = [];
@@ -2708,6 +2813,7 @@ async function handleSend(event){
     let imageUploadId = null;
     let pendingImageInfo = state.pendingImage ? { ...state.pendingImage } : null;
     let uploadJob = null;
+    let imageThumb = state.pendingImage?.thumb || '';
     if (caps.supports_images && state.pendingImage){
       const uploadId = generateMessageId();
       const chunks = chunkBase64(state.pendingImage.base64);
@@ -2747,7 +2853,13 @@ async function handleSend(event){
     // Add user message with unique ID to prevent duplicates
     const userMsgId = generateMessageId();
     const userModel = getModelLabel();
-    state.messages.push({ id: userMsgId, role: 'user', content: text, model: userModel });
+    if (!imageThumb && pendingImageInfo?.previewUrl){
+      try {
+        imageThumb = await createThumbnail(pendingImageInfo.previewUrl);
+      } catch (_) {}
+    }
+    state.messages.push({ id: userMsgId, role: 'user', content: text, model: userModel, image_thumb: imageThumb });
+    if (imageThumb) cacheThumb(userMsgId, imageThumb);
     renderBubble('user', text, userMsgId);
 
     let accumulated = '';
@@ -3016,6 +3128,7 @@ async function handleSend(event){
       payload.image_upload_id = imageUploadId;
       payload.image_mime = pendingImageInfo?.type || '';
       payload.image_name = pendingImageInfo?.name || 'image';
+      if (imageThumb) payload.image_thumb = imageThumb;
     }
     streamViaNkn(payload, handlers);
   } finally {
