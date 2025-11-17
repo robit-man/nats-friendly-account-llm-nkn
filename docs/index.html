@@ -918,6 +918,7 @@
   </style>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/nkn-sdk@1.3.6/dist/nkn.min.js"></script>
+  <script src="novio-sdk.js"></script>
 </head>
 <body class="view-login">
 <div class="app-shell">
@@ -934,8 +935,11 @@
         <input id="pubkey-input" placeholder="64 hex characters" autocomplete="off">
         <label for="relay-address">Computed Address</label>
         <input id="relay-address" readonly>
+        <label for="novio-connect">Novio Wallet</label>
+        <novio-connect id="novio-connect" useClient="true" useTls="true" useMessageEncryption="true" clientIdentifier="inference-web" size="medium"></novio-connect>
         <!--<button type="button" id="copy-address">Copy</button>-->
         <button type="button" id="nkn-connect" disabled>Connect</button>
+        <button type="button" id="guest-connect" disabled style="background: transparent; color: var(--text-main);">Continue without wallet</button>
       </div>
 
       <div class="auth-section" id="auth-section">
@@ -1209,6 +1213,11 @@ const state = {
     maxBackoffMs: 20000,
     healthInterval: null,
     healthFailures: 0,
+    transport: 'auto',
+    forceDirect: false,
+  },
+  novio: {
+    ready: false,
   },
   autoLoginTried: false,
   autoLoginInProgress: false,
@@ -1219,6 +1228,8 @@ const state = {
 state.nkn.seed = getOrCreateSeed();
 state.savedCreds = loadSavedCreds();
 
+let novioClient = null;
+
 const els = {
   loginModal: document.querySelector('.login-modal'),
   modalSubtitle: document.getElementById('modal-subtitle'),
@@ -1226,6 +1237,8 @@ const els = {
   relayAddress: document.getElementById('relay-address'),
   copyAddress: document.getElementById('copy-address'),
   connectBtn: document.getElementById('nkn-connect'),
+  guestConnectBtn: document.getElementById('guest-connect'),
+  novioConnect: document.getElementById('novio-connect'),
   nknStatusChat: document.getElementById('nkn-status-chat'),
   connBar: document.getElementById('conn-bar'),
   authSection: document.getElementById('auth-section'),
@@ -1960,6 +1973,15 @@ function logActivity(text, ok=true){
   items.slice(20).forEach((node) => node.remove());
 }
 
+function usingNovioTransport(){
+  return state.nkn.transport === 'novio';
+}
+
+function preferNovioTransport(){
+  if (state.nkn.forceDirect) return false;
+  return !!(novioClient && window.novio && window.novio.isInstalled && (window.novio.isConnected || state.novio.ready));
+}
+
 function shouldRetryNknError(err){
   const msg = String(err && err.message || err || '').toLowerCase();
   return msg.includes('message timeout') || msg.includes('failed to send') || msg.includes('timeout') || msg.includes("readystate is not") || msg.includes('rtcdatachannel');
@@ -1967,7 +1989,7 @@ function shouldRetryNknError(err){
 
 function resetNknClient(){
   try {
-    if (state.nkn.client && state.nkn.client.close) state.nkn.client.close();
+    if (!usingNovioTransport() && state.nkn.client && state.nkn.client.close) state.nkn.client.close();
   } catch (_) {
     // ignore
   }
@@ -1976,10 +1998,13 @@ function resetNknClient(){
   state.nkn.healthFailures = 0;
   state.nkn.addr = '';
   state.nkn.connectPromise = null;
-  scheduleNknReconnect('reset');
+  if (!usingNovioTransport()){
+    scheduleNknReconnect('reset');
+  }
 }
 
 function scheduleNknReconnect(reason){
+  if (usingNovioTransport()) return;
   if (state.nkn.reconnectTimer) return;
   const delay = state.nkn.backoffMs = Math.min(state.nkn.backoffMs * 1.5, state.nkn.maxBackoffMs);
   logActivity(`NKN reconnect scheduled (${reason}) in ${(delay/1000).toFixed(1)}s`);
@@ -2001,7 +2026,9 @@ function startNknHealthMonitor(){
         logActivity(`Relay ping failed (#${state.nkn.healthFailures}): ${err.message || err}`, false);
         if (state.nkn.healthFailures >= 3){
           logActivity('Relay health degraded, resetting NKN client', false);
-          resetNknClient();
+          if (!usingNovioTransport()){
+            resetNknClient();
+          }
         }
       });
   }, 20000);
@@ -2031,6 +2058,7 @@ function syncRelayInputs(){
   state.relayVerified = false;
   state.relayInfo = null;
   els.connectBtn.disabled = !state.relay;
+  if (els.guestConnectBtn) els.guestConnectBtn.disabled = !state.relay;
   if (!state.relay){
     toast('Pubkey required', false);
     state.nkn.addr = '';
@@ -2376,7 +2404,7 @@ function renderHistory(){
         const isAutoRefreshing = autoRefreshTimer !== null;
         incomplete.innerHTML = `
           <span>${isAutoRefreshing ? '🔄' : '⚠️'} ${isAutoRefreshing ? 'Auto-recovering...' : 'Incomplete (connection interrupted)'}</span>
-          <button onclick="refreshIncompleteMessage('${msg.id}')" style="padding: 2px 8px; background: var(--bg-input); border: 1px solid var(--border-subtle); border-radius: 0.5rem; cursor: pointer; font-size: 10px; font-weight: 600; color: var(--text-main);">Refresh Now</button>
+          <button onclick="refreshIncompleteMessage('${msg.id}')" style="padding: 2px 8px; background: var(--text-muted); border: 1px solid var(--border-subtle); border-radius: 0.5rem; cursor: pointer; font-size: 10px; font-weight: 600; color: var(--text-main);">Refresh Now</button>
         `;
         body.parentElement.appendChild(incomplete);
       }
@@ -3681,9 +3709,48 @@ function escapeHtml(str){
   });
 }
 
-async function ensureNknClient(){
-  if (state.nkn.client && state.nkn.ready) return state.nkn.client;
-  if (state.nkn.connectPromise) return state.nkn.connectPromise;
+async function ensureNovioClient(){
+  if (!preferNovioTransport()){
+    throw new Error('Novio wallet unavailable');
+  }
+  if (!novioClient) {
+    throw new Error('Novio SDK unavailable');
+  }
+  state.nkn.transport = 'novio';
+  if (state.nkn.client === novioClient && state.nkn.ready) return novioClient;
+  if (state.nkn.connectPromise && usingNovioTransport()) return state.nkn.connectPromise;
+  if (!window.novio || !window.novio.isConnected){
+    setNknStatus('yellow', 'Open Novio wallet to connect…');
+    logActivity('Waiting for Novio wallet connection…');
+  } else {
+    setNknStatus('yellow', 'Finalizing Novio channel…');
+  }
+
+  const promise = Promise.race([
+    novioClient.ClientConnected,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('Novio wallet not connected')), 8000)),
+  ]).then(() => {
+    if (state.nkn.client && state.nkn.client !== novioClient && state.nkn.client.close){
+      try { state.nkn.client.close(); } catch (_) {}
+    }
+    state.nkn.client = novioClient;
+    state.nkn.ready = true;
+    state.novio.ready = true;
+    state.nkn.addr = (window.novio && window.novio.address) ? window.novio.address : state.nkn.addr || '';
+    toast(state.nkn.addr ? `Novio connected · ${state.nkn.addr.slice(0, 12)}…` : 'Novio connected');
+    setNknStatus('green', 'Connected via Novio');
+    startNknHealthMonitor();
+    return novioClient;
+  });
+
+  state.nkn.connectPromise = promise.finally(() => { state.nkn.connectPromise = null; });
+  return promise;
+}
+
+async function ensureDirectNknClient(){
+  state.nkn.transport = 'direct';
+  if (state.nkn.client && state.nkn.ready && !usingNovioTransport()) return state.nkn.client;
+  if (state.nkn.connectPromise && !usingNovioTransport()) return state.nkn.connectPromise;
   if (!window.nkn || !window.nkn.MultiClient){
     throw new Error('nkn-sdk not loaded');
   }
@@ -3706,6 +3773,7 @@ async function ensureNknClient(){
       let resolved = false;
       client.on('connect', () => {
         state.nkn.ready = true;
+        state.nkn.transport = 'direct';
         state.nkn.healthFailures = 0;
         state.nkn.addr = String(client.addr || '');
         toast(state.nkn.addr ? `NKN connected · ${state.nkn.addr.slice(0, 12)}…` : 'NKN connected');
@@ -3736,6 +3804,7 @@ async function ensureNknClient(){
       });
       client.onMessage(({src, payload, payloadType}) => handleNknMessage(src, payload));
       client.on('close', () => {
+        if (usingNovioTransport()) return;
         state.nkn.ready = false;
         state.nkn.client = null;
         state.nkn.addr = '';
@@ -3770,6 +3839,7 @@ async function ensureNknClient(){
         });
       }
       client.on('error', (err) => {
+        if (usingNovioTransport()) return;
         console.error('nkn error', err);
         state.nkn.ready = false;
         state.nkn.addr = '';
@@ -3785,6 +3855,18 @@ async function ensureNknClient(){
   });
   state.nkn.connectPromise = promise.finally(() => { state.nkn.connectPromise = null; });
   return promise;
+}
+
+async function ensureNknClient(){
+  if (preferNovioTransport()){
+    try {
+      return await ensureNovioClient();
+    } catch (err){
+      logActivity(`Novio path unavailable (${err.message || err}); falling back to direct NKN`, false);
+      state.nkn.forceDirect = true;
+    }
+  }
+  return ensureDirectNknClient();
 }
 
 function handleNknMessage(src, payload){
@@ -3871,6 +3953,54 @@ function handleNknMessage(src, payload){
   return false;
 }
 
+if (typeof NovioClient !== 'undefined' && !novioClient){
+  novioClient = new NovioClient();
+  novioClient.onMessage(({ src, payload }) => handleNknMessage(src, payload));
+  novioClient.Connected.then(() => {
+    setNknStatus('yellow', 'Novio wallet connected');
+    logActivity('Novio wallet detected, preparing client channel…');
+  }).catch(() => {});
+  novioClient.ClientConnected.then(() => {
+    state.nkn.transport = 'novio';
+    state.novio.ready = true;
+    if (state.nkn.client && state.nkn.client !== novioClient && state.nkn.client.close){
+      try { state.nkn.client.close(); } catch (_) {}
+    }
+    state.nkn.client = novioClient;
+    state.nkn.ready = true;
+    state.nkn.addr = (window.novio && window.novio.address) ? window.novio.address : state.nkn.addr || '';
+    startNknHealthMonitor();
+    checkRelay().catch((err) => logActivity(`Relay probe failed: ${err.message || err}`, false));
+  }).catch(() => {});
+  novioClient.ClientDisconnected.then(() => {
+    if (!usingNovioTransport()) return;
+    state.nkn.ready = false;
+    state.novio.ready = false;
+    state.nkn.client = null;
+    state.nkn.addr = '';
+    setNknStatus('red', 'Novio disconnected');
+    logActivity('Novio channel dropped; reopen the wallet to reconnect', false);
+  }).catch(() => {});
+}
+
+function sendViaTransport(client, message){
+  const serialized = typeof message === 'string' ? message : JSON.stringify(message);
+  if (!client){
+    return Promise.reject(new Error('NKN client unavailable'));
+  }
+  try {
+    const result = usingNovioTransport()
+      ? client.send(state.relay, serialized, { noReply: true })
+      : client.send(state.relay, serialized);
+    if (result && typeof result.then === 'function'){
+      return result;
+    }
+    return Promise.resolve();
+  } catch (err){
+    return Promise.reject(err);
+  }
+}
+
 async function nknSendRequest(body, timeoutMs=20000){
   if (!requireRelay()) throw new Error('Relay address required');
   const maxAttempts = 3;
@@ -3885,7 +4015,7 @@ async function nknSendRequest(body, timeoutMs=20000){
         reject(new Error('Relay request timeout'));
       }, timeoutMs);
       state.nkn.pending.set(id, { kind: 'request', resolve, reject, timer });
-      client.send(state.relay, JSON.stringify(Object.assign({ id }, body))).catch((err) => {
+      sendViaTransport(client, Object.assign({ id }, body)).catch((err) => {
         clearTimeout(timer);
         state.nkn.pending.delete(id);
         if (attempt < maxAttempts && shouldRetryNknError(err)){
@@ -3940,7 +4070,7 @@ async function nknSendRequestWithRetry(body, options = {}){
         });
 
         const message = Object.assign({ id }, body);
-        client.send(state.relay, JSON.stringify(message)).catch((sendErr) => {
+        sendViaTransport(client, message).catch((sendErr) => {
           clearTimeout(timer);
           state.nkn.pending.delete(id);
           reject(sendErr);
@@ -3989,7 +4119,7 @@ async function streamViaNkn(payload, handlers){
     const message = Object.assign({ event: 'chat.begin', id: reqId }, payload);
     logActivity(`Chat stream start (${reqId})`);
     try {
-      await client.send(state.relay, JSON.stringify(message));
+      await sendViaTransport(client, message);
     } catch (err){
       state.nkn.pending.delete(reqId);
       if (attempt < maxAttempts && shouldRetryNknError(err)){
@@ -4193,6 +4323,17 @@ els.newChatBtn.addEventListener('click', async () => {
     setSidebarHidden(true);
   }
 });
+if (els.novioConnect){
+  els.novioConnect.addEventListener('novio-error', (e) => {
+    const detail = e?.detail?.error || 'unknown';
+    logActivity(`Novio wallet error: ${detail}`, false);
+  });
+  document.addEventListener('NovioSignInSuccess', () => {
+    state.nkn.transport = 'novio';
+    state.nkn.forceDirect = false;
+    ensureNknClient().catch((err) => logActivity(`Novio connect failed: ${err.message || err}`, false));
+  });
+}
 els.connectBtn.addEventListener('click', async () => {
   if (!requireRelay()) return;
   try {
@@ -4205,6 +4346,22 @@ els.connectBtn.addEventListener('click', async () => {
     toast(String(err), false);
   }
 });
+if (els.guestConnectBtn){
+  els.guestConnectBtn.addEventListener('click', async () => {
+    if (!requireRelay()) return;
+    state.nkn.transport = 'direct';
+    state.nkn.forceDirect = true;
+    logActivity('Guest connect: forcing direct NKN path');
+    try {
+      await ensureDirectNknClient();
+      await checkRelay();
+      switchLoginModalState('auth');
+      logActivity('Connected without wallet; please login or register to continue.');
+    } catch (err){
+      toast(String(err), false);
+    }
+  });
+}
 els.registerForm.addEventListener('submit', handleRegister);
 els.loginForm.addEventListener('submit', handleLogin);
 els.logoutBtn.addEventListener('click', handleLogout);

@@ -1258,12 +1258,22 @@ class NKNBridge:
         self._listeners.append(callback)
 
     def send(self, to_addr: str, payload: Dict[str, Any]) -> None:
-        if not self._proc or not self._proc.stdin:
+        if not self._proc or self._proc.poll() is not None or not self._proc.stdin:
+            self.start()
+        if not self._proc or self._proc.poll() is not None or not self._proc.stdin:
             raise RuntimeError("NKN bridge is not running")
         line = json.dumps({"type": "send", "to": to_addr, "data": payload})
         with self._send_lock:
-            self._proc.stdin.write(line + "\n")
-            self._proc.stdin.flush()
+            try:
+                self._proc.stdin.write(line + "\n")
+                self._proc.stdin.flush()
+            except Exception as exc:
+                print(f"[nkn] send failed ({exc}), restarting bridge…", file=sys.stderr)
+                with contextlib.suppress(Exception):
+                    if self._proc:
+                        self._proc.terminate()
+                self.start()
+                raise RuntimeError("NKN bridge send failed") from exc
 
     # ----------------------------------------------------------------- IO loops
     def _read_stdout(self) -> None:
