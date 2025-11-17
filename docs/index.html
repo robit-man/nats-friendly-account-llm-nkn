@@ -21,6 +21,9 @@
       --radius-inner: 0.5rem;
       --shadow-card: 0 12px 30px rgba(0, 0, 0, 0.08);
       --grid-dot: rgba(0, 0, 0, 0.06);
+      --bubble-user: #e5e7eb;
+      --bubble-assistant: #f8f8f8;
+      --bubble-border: var(--border-subtle);
     }
     * { box-sizing: border-box; }
     body {
@@ -80,7 +83,7 @@
     .model-status-pill:hover { background: #f0f0f0; transform: translateY(-1px); }
     .model-status-pill[data-phase="idle"] {
       background: rgba(187,247,208,0.35);
-      color: #065f46;
+      color: #468372;
     }
     .model-status-pill[data-phase="loading"] {
       background: rgba(252, 211, 77, 0.35);
@@ -284,14 +287,14 @@
     .chat-message-user { align-items: flex-end; }
     .chat-message-assistant { align-items: flex-start; }
     .chat-meta { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .12em; color: var(--text-muted); }
-    .chat-bubble {
-      max-width: 86%; padding: 12px 16px; border-radius: var(--radius-inner);
-      font-size: 14px; line-height: 1.4; box-shadow: none;
-      position: relative;
-      overflow: hidden;
-    }
-    .chat-bubble-user { background: #e5e7eb; border: 1px solid var(--border-subtle); }
-    .chat-bubble-assistant { background: #f8f8f8; border: 1px solid var(--border-subtle); }
+.chat-bubble {
+  max-width: 86%; padding: 12px 16px; border-radius: var(--radius-inner);
+  font-size: 14px; line-height: 1.4; box-shadow: none;
+  position: relative;
+  overflow: hidden;
+}
+.chat-bubble-user { background: var(--bubble-user); border: 1px solid var(--bubble-border); }
+.chat-bubble-assistant { background: var(--bubble-assistant); border: 1px solid var(--bubble-border); }
     .typing-reveal {
       position: absolute;
       inset: 0;
@@ -391,7 +394,49 @@
   width: 120px;
   height: auto;
   max-height: 160px;
-  border-radius: 10px;
+  border: 1px solid var(--border-subtle);
+  display: block;
+  margin-bottom: 8px;
+  object-fit: contain;
+}
+.theme-toggle {
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-input);
+  border-radius: var(--radius-inner);
+  padding: 6px 10px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-main);
+}
+.theme-toggle svg {
+  width: 18px;
+  height: 18px;
+}
+.theme-toggle:hover {
+  background: var(--bg-panel);
+}
+.theme-dark {
+  --bg-page: #0f172a;
+  --bg-card: #111827;
+  --bg-panel: #0b1220;
+  --bg-input: #1f2937;
+  --border-subtle: #1f2937;
+  --text-main: #e5e7eb;
+  --text-muted: #9ca3af;
+  --accent: #3b82f6;
+  --accent-soft: rgba(59,130,246,0.08);
+  --shadow-card: 0 12px 30px rgba(0,0,0,0.35);
+  --grid-dot: rgba(255,255,255,0.06);
+  --bubble-user: #1f2937;
+  --bubble-assistant: #111827;
+  --bubble-border: #1f2937;
+}
+.chat-thumb {
+  width: 120px;
+  height: auto;
+  max-height: 160px;
   border: 1px solid var(--border-subtle);
   display: block;
   margin-bottom: 8px;
@@ -666,11 +711,11 @@
       box-shadow: none;
     }
     .session-item:hover {
-      background: #f3f4f6;
+      background: var(--accent-soft);
       transform: translateY(1px);
     }
     .session-item.active {
-      background: #e5e7eb; border: 1px solid var(--border-subtle);
+      background: var(--bubble-user); border: 1px solid var(--border-subtle);
       box-shadow: none;
     }
     .session-item-content {
@@ -694,7 +739,7 @@
       opacity: 1;
     }
     .session-item-delete:hover {
-      color: #dc2626; background: rgba(220,38,38,0.1);
+      color: #dc2626; background: var(--accent-soft);
     }
     .card {
       border-radius: 0 var(--radius-card) var(--radius-card) 0;
@@ -851,6 +896,10 @@
             </div>
             <span id="session-gpu-util-label-small">—%</span>
           </div>
+          <button type="button" class="theme-toggle" id="theme-toggle" title="Toggle theme">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v2m0 14v2m9-9h-2M5 12H3m15.36 6.36l-1.42-1.42M6.06 6.06 4.64 4.64m12.72 0-1.42 1.42M6.06 17.94 4.64 19.36"/><circle cx="12" cy="12" r="4"/></svg>
+            <span id="theme-toggle-label">Light</span>
+          </button>
           <button type="button" id="logout-btn" aria-label="Log out">
             <svg width="18" height="18" viewBox="0 0 24 24" role="img" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
               <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
@@ -951,6 +1000,7 @@ const STORAGE_KEYS = {
   legacySeed: 'loving.nkn.seed',
   modelCaps: 'inference.model.capabilities',
   thumbs: 'inference.message.thumbs',
+  theme: 'inference.theme',
 };
 
 // Parse URL parameter for relay server endpoint
@@ -984,6 +1034,8 @@ const state = {
   currentCapabilities: { supports_images: false, supports_thinking: false },
   modelCapsCache: new Map(),
   thumbsCache: new Map(),
+  theme: 'light',
+  userPreferences: {},
   pendingImage: null,
   thinkingEnabled: false,
   uploadStatuses: new Map(),
@@ -1071,10 +1123,13 @@ const els = {
   sessionHardwareInline: document.getElementById('session-hardware-inline'),
   sessionGpuUtilBarInline: document.getElementById('session-gpu-util-bar'),
   sessionGpuUtilLabelInline: document.getElementById('session-gpu-util-label-small'),
+  themeToggle: document.getElementById('theme-toggle'),
+  themeToggleLabel: document.getElementById('theme-toggle-label'),
 };
 
 loadCachedModelCaps();
 loadCachedThumbs();
+applyTheme(loadStoredTheme());
 
 function getCurrentSession(){
   return state.sessions.find((s) => s.id === state.currentSessionId) || null;
@@ -1135,6 +1190,52 @@ function cacheThumb(messageId, dataUrl){
 function getCachedThumb(messageId){
   if (!messageId) return null;
   return state.thumbsCache.get(messageId) || null;
+}
+
+function loadStoredTheme(){
+  const stored = localStorage.getItem(STORAGE_KEYS.theme);
+  if (stored === 'dark' || stored === 'light') {
+    state.theme = stored;
+  }
+  return state.theme;
+}
+
+function applyTheme(theme){
+  const desired = theme === 'dark' ? 'dark' : 'light';
+  state.theme = desired;
+  if (desired === 'dark'){
+    document.body.classList.add('theme-dark');
+  } else {
+    document.body.classList.remove('theme-dark');
+  }
+  const label = els.themeToggleLabel;
+  if (label) label.textContent = desired === 'dark' ? 'Dark' : 'Light';
+  if (!state.userPreferences) state.userPreferences = {};
+  state.userPreferences.theme = desired;
+  try { localStorage.setItem(STORAGE_KEYS.theme, desired); } catch (_) {}
+}
+
+async function saveUserPreferences() {
+  if (!state.session || !state.session.username) return;
+  try {
+    await nknSendRequestWithRetry({ event: 'user.prefs.set', preferences: state.userPreferences || {} });
+  } catch (err){
+    console.warn('Failed to persist preferences', err);
+  }
+}
+
+async function fetchUserPreferences() {
+  if (!state.session) return {};
+  try {
+    const resp = await nknSendRequestWithRetry({ event: 'user.prefs.get' });
+    const prefs = (resp && typeof resp.preferences === 'object') ? resp.preferences : {};
+    state.userPreferences = prefs;
+    if (prefs.theme) applyTheme(prefs.theme);
+    return prefs;
+  } catch (err){
+    console.warn('Failed to load preferences', err);
+    return {};
+  }
 }
 
 function getCapabilitiesForModel(modelName){
@@ -2242,6 +2343,10 @@ async function performLogin(username, password, { auto }) {
     const messages = Array.isArray(resp.messages) ? resp.messages : [];
     const sessions = Array.isArray(resp.sessions) ? resp.sessions : [];
     const currentSessionId = resp.current_session_id || null;
+    state.userPreferences = (resp.preferences && typeof resp.preferences === 'object') ? resp.preferences : {};
+    if (state.userPreferences.theme) {
+      applyTheme(state.userPreferences.theme);
+    }
 
     applyLoginSuccess(uname, sessions, currentSessionId, messages, resp.current_session_model);
 
@@ -2268,6 +2373,11 @@ function applyLoginSuccess(username, sessions, currentSessionId, messages, curre
   state.session = { username };
   state.sessions = sessions || [];
   state.currentSessionId = currentSessionId;
+  if (state.userPreferences && state.userPreferences.theme){
+    applyTheme(state.userPreferences.theme);
+  }
+  // Refresh preferences from server to ensure latest (non-blocking)
+  fetchUserPreferences().catch(() => {});
   // Add IDs to messages from DB
   state.messages = (messages || []).map(msg => normalizeMessage(msg, currentSessionModel || getModelLabel()));
   syncCurrentModelFromState(currentSessionModel);
@@ -2297,6 +2407,7 @@ async function handleLogout(){
   state.sessions = [];
   state.currentSessionId = null;
   state.messages = [];
+  state.userPreferences = {};
   state.selectedModel = null;
   state.availableModels = [];
   // Clear auto-refresh timer
@@ -3673,6 +3784,12 @@ if (els.modelModalClose) els.modelModalClose.addEventListener('click', closeMode
 if (els.modelModal) {
   els.modelModal.addEventListener('click', (e) => {
     if (e.target === els.modelModal) closeModelModal();
+  });
+}
+if (els.themeToggle){
+  els.themeToggle.addEventListener('click', () => {
+    applyTheme(state.theme === 'dark' ? 'light' : 'dark');
+    saveUserPreferences();
   });
 }
 document.addEventListener('keydown', (e) => {

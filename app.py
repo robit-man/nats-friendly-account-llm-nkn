@@ -260,6 +260,7 @@ class Database:
         self._connection = sqlite3.connect(str(path), check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
         self._messages_has_model: bool = False
+        self._users_has_prefs: bool = False
         self._initialize_schema()
 
     def _initialize_schema(self) -> None:
@@ -274,7 +275,8 @@ class Database:
                     username TEXT NOT NULL UNIQUE,
                     password_hash TEXT NOT NULL,
                     created_at TEXT NOT NULL,
-                    last_nkn_addr TEXT DEFAULT ''
+                    last_nkn_addr TEXT DEFAULT '',
+                    preferences TEXT DEFAULT '{}'
                 );
                 """
             )
@@ -285,6 +287,14 @@ class Database:
                 self._connection.commit()
             except sqlite3.OperationalError:
                 pass
+            try:
+                cur.execute("ALTER TABLE users ADD COLUMN preferences TEXT DEFAULT '{}'")
+                self._connection.commit()
+            except sqlite3.OperationalError:
+                pass
+            cur.execute("PRAGMA table_info(users);")
+            user_cols = {row[1] for row in cur.fetchall()}
+            self._users_has_prefs = "preferences" in user_cols
 
             # Chat sessions table
             cur.execute(
@@ -393,19 +403,25 @@ class Database:
         password_hash = hash_password(password)
         with self._lock:
             try:
-                cur = self._connection.execute(
-                    "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?);",
-                    (username, password_hash, now),
-                )
+                if self._users_has_prefs:
+                    cur = self._connection.execute(
+                        "INSERT INTO users (username, password_hash, created_at, preferences) VALUES (?, ?, ?, '{}');",
+                        (username, password_hash, now),
+                    )
+                else:
+                    cur = self._connection.execute(
+                        "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?);",
+                        (username, password_hash, now),
+                    )
                 self._connection.commit()
                 return int(cur.lastrowid)
             except sqlite3.IntegrityError:
                 return None
 
-    def authenticate_user(self, username: str, password: str) -> Optional[Tuple[int, str]]:
+    def authenticate_user(self, username: str, password: str) -> Optional[Tuple[int, str, Dict[str, Any]]]:
         with self._lock:
             cur = self._connection.execute(
-                "SELECT id, username, password_hash FROM users WHERE username = ?;",
+                "SELECT id, username, password_hash, preferences FROM users WHERE username = ?;",
                 (username,),
             )
             row = cur.fetchone()
@@ -413,7 +429,13 @@ class Database:
             return None
         if not verify_password(password, row["password_hash"]):
             return None
-        return row["id"], row["username"]
+        prefs = {}
+        if self._users_has_prefs and row["preferences"]:
+            try:
+                prefs = json.loads(row["preferences"])
+            except Exception:
+                prefs = {}
+        return row["id"], row["username"], prefs
 
     def create_session(self, user_id: int, title: str = "New Chat", model: Optional[str] = None) -> int:
         """Create a new chat session and return its ID."""
@@ -620,6 +642,36 @@ class Database:
                 (address, user_id),
             )
             self._connection.commit()
+
+    def set_user_preferences(self, user_id: int, prefs: Dict[str, Any]) -> None:
+        if not self._users_has_prefs:
+            return
+        try:
+            encoded = json.dumps(prefs or {})
+        except Exception:
+            encoded = "{}"
+        with self._lock:
+            self._connection.execute(
+            "UPDATE users SET preferences = ? WHERE id = ?;",
+            (encoded, user_id),
+        )
+            self._connection.commit()
+
+    def get_user_preferences(self, user_id: int) -> Dict[str, Any]:
+        if not self._users_has_prefs:
+            return {}
+        with self._lock:
+            cur = self._connection.execute(
+                "SELECT preferences FROM users WHERE id = ? LIMIT 1;",
+                (user_id,),
+            )
+            row = cur.fetchone()
+        if not row or not row["preferences"]:
+            return {}
+        try:
+            return json.loads(row["preferences"])
+        except Exception:
+            return {}
 
     def upsert_partial_message(self, user_id: int, session_id: int, role: str, content: str, uuid: str, last_seq: int, model: Optional[str] = None) -> None:
         """Create or update a partial (streaming) message."""
@@ -1403,6 +1455,12 @@ class NKNRelayServer:
         if event == "models.list":
             self._handle_models_list(src, payload)
             return
+        if event == "user.prefs.set":
+            self._handle_prefs_set(src, payload)
+            return
+        if event == "user.prefs.get":
+            self._handle_prefs_get(src, payload)
+            return
         if event == "image.upload":
             self._handle_image_upload(src, payload)
             return
@@ -1551,7 +1609,7 @@ class NKNRelayServer:
             self._reply(src, req_id, "auth.login.error", message="invalid credentials")
             print(f"[auth] Failed login attempt for username '{username}' from {src}")
             return
-        user_id, uname = auth
+        user_id, uname, preferences = auth
 
         # Check if user is already logged in from a different address
         existing_session = self._find_user_session(user_id)
@@ -1571,6 +1629,9 @@ class NKNRelayServer:
         sessions = self._db.get_sessions(user_id)
         messages = self._db.get_recent_messages(user_id=user_id, session_id=session_id, limit=MAX_CONTEXT_MESSAGES)
         current_model = self._db.get_session_model(session_id)
+        preferences = {}
+        if auth and len(auth) > 2:
+            preferences = auth[2] or {}
 
         self._reply(
             src,
@@ -1583,6 +1644,7 @@ class NKNRelayServer:
             sessions=sessions,
             messages=messages,
             nkn_address=src,
+            preferences=preferences or {},
         )
 
     def _find_user_session(self, user_id: int) -> Optional[str]:
@@ -1799,6 +1861,32 @@ class NKNRelayServer:
             self._reply(src, req_id, "models.list.error", message=str(exc))
             return
         self._reply(src, req_id, "models.list", models=models)
+
+    def _handle_prefs_set(self, src: str, payload: Dict[str, Any]) -> None:
+        """Persist user preferences (arbitrary JSON)."""
+        req_id = payload.get("id")
+        session = self._sessions.get(src)
+        if session is None:
+            self._reply(src, req_id, "user.prefs.set.error", error="not_authenticated")
+            return
+        user_id, _, _ = session
+        prefs = payload.get("preferences")
+        if not isinstance(prefs, dict):
+            self._reply(src, req_id, "user.prefs.set.error", error="preferences must be object")
+            return
+        self._db.set_user_preferences(user_id, prefs)
+        self._reply(src, req_id, "user.prefs.set.ok", preferences=prefs)
+
+    def _handle_prefs_get(self, src: str, payload: Dict[str, Any]) -> None:
+        """Return stored user preferences."""
+        req_id = payload.get("id")
+        session = self._sessions.get(src)
+        if session is None:
+            self._reply(src, req_id, "user.prefs.get.error", error="not_authenticated")
+            return
+        user_id, _, _ = session
+        prefs = self._db.get_user_preferences(user_id)
+        self._reply(src, req_id, "user.prefs.get.ok", preferences=prefs)
 
     def _handle_image_upload(self, src: str, payload: Dict[str, Any]) -> None:
         """Accept chunked image uploads over DM prior to chat.begin."""
