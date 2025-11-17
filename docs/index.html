@@ -339,17 +339,36 @@
       color: var(--text-main);
     }
     .tool-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-    .chip {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      padding: 6px 10px;
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
       border-radius: var(--radius-inner);
-      border: 1px solid var(--border-subtle);
-      background: var(--bg-input);
-      color: var(--text-main);
-      font-size: 12px;
-    }
+    border: 1px solid var(--border-subtle);
+    background: var(--bg-input);
+    color: var(--text-main);
+    font-size: 12px;
+  }
+  .thinking-chip {
+    cursor: pointer;
+    position: relative;
+    transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease;
+  }
+  .thinking-chip input[type="checkbox"] {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    cursor: pointer;
+  }
+  .thinking-chip.on {
+    background: var(--text-main);
+    color: var(--bubble-user);
+    border-color: var(--text-muted);
+  }
+  .thinking-chip .thinking-label {
+    pointer-events: none;
+  }
 .upload-status {
   display: inline-flex;
   align-items: center;
@@ -586,11 +605,12 @@
       justify-content: center;
       padding: 20px;
       z-index: 1100;
+      backdrop-filter: blur(10px);
     }
     .model-modal.hidden { display: none; }
     .model-modal-content {
       width: min(900px, 100%);
-      max-height: 90vh;
+      max-height: calc(100% - 10rem);
       overflow: auto;
       background: var(--bg-card);
       border: 1px solid var(--border-subtle);
@@ -843,7 +863,7 @@
       overflow: hidden;
     }
     .sessions-sidebar.hidden + .card {
-      border-radius: var(--radius-card);
+      border-radius: var(--radius-inner);
     }
 
     @media (max-width: 640px) {
@@ -858,20 +878,22 @@
         width: 100%;
         padding: unset;
         box-sizing: border-box;
-        box-shadow: unset;}
+        box-shadow: unset;
+      }
       .chat-bubble { max-width: 100%; }
       .chat-messages{ padding: 16px; min-height: 200px;}
       .chat-textarea { min-height: 60px; }
       .conn-bar { flex-direction: column; align-items: stretch; }
       .sessions-sidebar { 
         width: calc(100% - 2rem);
-        border-radius: 1rem;position: absolute; z-index: 100; height: 100%; }
+        border-radius: var(--radius-inner)!important;position: absolute; z-index: 100; height: 100%; }
       .chat-interface.sidebar-hidden .chat-main-content {
         padding-left: 16px;
       }
       .hardware-panel {
         display: none;
       }
+      .model-card{width:100%;}
       .session-bar {
         justify-content:flex-start;
       }
@@ -1031,22 +1053,22 @@
               <div id="image-tool" class="tool images-tool hidden">
                 <input type="file" id="image-input" accept="image/*" style="display:none">
                 <button type="button" class="tool-btn" id="attach-image-btn">Attach image</button>
-                <span class="chip hidden" id="image-chip">
-                  <span id="image-chip-label"></span>
-                  <button type="button" class="remove" id="remove-image-btn" aria-label="Remove image">×</button>
-                </span>
-              </div>
+              <span class="chip hidden" id="image-chip">
+                <span id="image-chip-label"></span>
+                <button type="button" class="remove" id="remove-image-btn" aria-label="Remove image">×</button>
+              </span>
+            </div>
               <div id="tools-tool" class="tool tools-tool hidden">
                 <button type="button" class="tool-btn" id="manage-tools-btn">Tools</button>
-                <span class="chip hidden" id="tools-chip">
-                  <span id="tools-chip-label"></span>
-                </span>
-              </div>
-              <label class="chip hidden" id="thinking-chip">
-                <input type="checkbox" id="thinking-toggle">
-                <span>Thinking</span>
-              </label>
+              <span class="chip hidden" id="tools-chip">
+                <span id="tools-chip-label"></span>
+              </span>
             </div>
+            <label class="chip hidden thinking-chip" id="thinking-chip">
+              <input type="checkbox" id="thinking-toggle" aria-label="Toggle thinking">
+              <span class="thinking-label">Thinking</span>
+            </label>
+          </div>
           </form>
         </div>
       </section>
@@ -3100,6 +3122,9 @@ function updateToolVisibility(){
     if (!caps.supports_thinking){
       state.thinkingEnabled = false;
       if (els.thinkingToggle) els.thinkingToggle.checked = false;
+      els.thinkingChip.classList.remove('on');
+    } else if (els.thinkingToggle && els.thinkingToggle.checked){
+      els.thinkingChip.classList.add('on');
     }
   }
 }
@@ -4020,6 +4045,7 @@ function init(){
   updateToolVisibility();
   updateToolsChip();
   updatePendingImageUI();
+  setSidebarHidden(isMobileViewport());
 
   // Auto-login will happen in checkRelay() after NKN connects
 }
@@ -4209,6 +4235,9 @@ if (els.toolForm){
 if (els.thinkingToggle){
   els.thinkingToggle.addEventListener('change', (e) => {
     state.thinkingEnabled = !!e.target.checked;
+    if (els.thinkingChip){
+      els.thinkingChip.classList.toggle('on', state.thinkingEnabled);
+    }
   });
 }
 if (els.modelStatusPill){
