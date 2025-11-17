@@ -42,7 +42,6 @@
     .app-shell { min-height: calc(var(--vh, 1vh) * 100); display: flex; flex-direction: column; position: relative; z-index: 1; }
     .app-header {
       padding: 16px 24px;
-      border-radius: var(--radius-card);
       display: flex; justify-content: space-between; align-items: center; gap: 16px;
       background: var(--bg-card);
       border: 1px solid var(--border-subtle);
@@ -940,6 +939,7 @@ const STORAGE_KEYS = {
   legacyPubkey: 'loving.pubkey',
   seed: 'inference.nkn.seed',
   legacySeed: 'loving.nkn.seed',
+  modelCaps: 'inference.model.capabilities',
 };
 
 // Parse URL parameter for relay server endpoint
@@ -971,6 +971,7 @@ const state = {
   selectedModel: null,
   availableModels: [],
   currentCapabilities: { supports_images: false, supports_thinking: false },
+  modelCapsCache: new Map(),
   pendingImage: null,
   thinkingEnabled: false,
   uploadStatuses: new Map(),
@@ -1060,13 +1061,49 @@ const els = {
   sessionGpuUtilLabelInline: document.getElementById('session-gpu-util-label-small'),
 };
 
+loadCachedModelCaps();
+
 function getCurrentSession(){
   return state.sessions.find((s) => s.id === state.currentSessionId) || null;
 }
 
+function loadCachedModelCaps(){
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.modelCaps);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object'){
+      Object.entries(parsed).forEach(([name, caps]) => {
+        if (name && caps) state.modelCapsCache.set(name, caps);
+      });
+    }
+  } catch (_) {}
+}
+
+function persistCachedModelCaps(){
+  const obj = {};
+  state.modelCapsCache.forEach((caps, name) => {
+    obj[name] = caps;
+  });
+  try {
+    localStorage.setItem(STORAGE_KEYS.modelCaps, JSON.stringify(obj));
+  } catch (_) {}
+}
+
 function getCapabilitiesForModel(modelName){
+  if (!modelName) return { supports_images: false, supports_thinking: false };
   const target = (state.availableModels || []).find((m) => m.name === modelName);
-  return (target && target.capabilities) || { supports_images: false, supports_thinking: false };
+  if (target && target.capabilities){
+    state.modelCapsCache.set(modelName, target.capabilities);
+    persistCachedModelCaps();
+    return target.capabilities;
+  }
+  const cached = state.modelCapsCache.get(modelName);
+  if (cached) return cached;
+  const inferred = inferCapabilitiesFromNameFrontend(modelName);
+  state.modelCapsCache.set(modelName, inferred);
+  persistCachedModelCaps();
+  return inferred;
 }
 
 function getModelLabel(){
@@ -1141,9 +1178,11 @@ async function fetchAvailableModels(){
         const inferred = inferCapabilitiesFromNameFrontend(entry.name);
         entry.capabilities.supports_images = entry.capabilities.supports_images || inferred.supports_images;
         entry.capabilities.supports_thinking = entry.capabilities.supports_thinking || inferred.supports_thinking;
+        if (entry.name) state.modelCapsCache.set(entry.name, entry.capabilities);
         return entry;
       })
       .filter((m) => m && m.name);
+    persistCachedModelCaps();
     renderModelOptions();
     state.currentCapabilities = getCapabilitiesForModel(getModelLabel());
     updateToolVisibility();
@@ -1219,6 +1258,7 @@ async function handleModelSelect(modelName){
   try {
     await setSessionModel(modelName);
     state.currentCapabilities = getCapabilitiesForModel(modelName);
+    persistCachedModelCaps();
     updateToolVisibility();
     closeModelModal();
   } catch (err) {
@@ -2352,12 +2392,18 @@ function clearUploadTracking(uploadId, { removeStatus = true, delayMs = 0 } = {}
   }
 }
 
-function registerUploadGuard(uploadId, assistantId, timeoutMs = 20000){
+function registerUploadGuard(uploadId, assistantId, timeoutMs = 60000){
   if (!uploadId) return;
   state.uploadToAssistant.set(uploadId, assistantId);
   const existing = state.uploadGuards.get(uploadId);
   if (existing) clearTimeout(existing);
   const timer = setTimeout(() => {
+    const job = state.uploadJobs.get(uploadId);
+    if (job && job.completed) {
+      clearUploadTracking(uploadId, { removeStatus: true });
+      cancelUploadGuard(uploadId);
+      return;
+    }
     if (state.uploadStatuses.has(uploadId)) {
       failUploadStatus(uploadId, 'Timed out waiting for reply', { onRetry: () => { cancelUploadGuard(uploadId); retryUpload(uploadId); } });
       renderUploadFailureMessage('Upload timed out before model responded.', uploadId);
@@ -2379,13 +2425,18 @@ function cancelUploadGuard(uploadId){
 
 function renderUploadFailureMessage(reason, uploadId){
   const job = uploadId ? state.uploadJobs.get(uploadId) : null;
-  if (job && job.failureNoted) return;
+  if (job && (job.failureNoted || job.completed)) return;
   if (job) job.failureNoted = true;
   const friendly = reason ? `Image upload failed: ${reason}` : 'Image upload failed.';
   const msgId = generateMessageId();
   const content = `*${friendly}* Please retry your message.`;
   renderBubble('assistant', content, msgId);
   state.messages.push({ id: msgId, role: 'assistant', content, is_complete: true, model: getModelLabel() });
+}
+
+function markUploadCompleted(uploadId){
+  const job = state.uploadJobs.get(uploadId);
+  if (job) job.completed = true;
 }
 
 async function sendImageChunkWithAck(uploadId, chunk, job){
@@ -2459,6 +2510,10 @@ async function uploadMissingChunks(uploadId){
     }
   } finally {
     job.inFlight = false;
+    const receivedTotal = job.acknowledged.filter(Boolean).length;
+    if (receivedTotal === job.chunks.length) {
+      markUploadCompleted(uploadId);
+    }
   }
 }
 
@@ -2666,6 +2721,7 @@ async function handleSend(event){
         size: state.pendingImage.size || 0,
         inFlight: false,
         failureNoted: false,
+        completed: false,
       };
       state.uploadJobs.set(uploadId, uploadJob);
       addUploadStatus(uploadId, chunks.length, state.pendingImage.name, uploadJob.previewUrl);
@@ -2725,6 +2781,7 @@ async function handleSend(event){
     };
     const cleanupUpload = (opts = {}) => {
       if (imageUploadId) {
+        markUploadCompleted(imageUploadId);
         clearUploadTracking(imageUploadId, opts);
       }
     };
@@ -2734,6 +2791,7 @@ async function handleSend(event){
         if (!streamingNoted){
           streamingNoted = true;
           cancelUploadTimeout();
+          if (imageUploadId) markUploadCompleted(imageUploadId);
           if (state.modelStatus.phase !== 'streaming'){
             setModelStatus('streaming', { model: modelLabel });
           }
@@ -2786,6 +2844,7 @@ async function handleSend(event){
       },
       onDone(totalSeq, finalContent){
         cancelUploadTimeout();
+        if (imageUploadId) markUploadCompleted(imageUploadId);
         // Apply any buffered out-of-order deltas before finalizing
         if (deltaBuffer.size > 0) {
           const pendingSeqs = Array.from(deltaBuffer.keys()).sort((a, b) => a - b);
@@ -3105,6 +3164,7 @@ function handleNknMessage(src, payload){
       const uploadId = data.upload_id || data.uploadId;
       if (uploadId){
         cancelUploadGuard(uploadId);
+        markUploadCompleted(uploadId);
         completeUploadStatus(uploadId);
       }
     }
