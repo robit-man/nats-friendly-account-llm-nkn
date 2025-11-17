@@ -593,6 +593,92 @@
       flex-direction: column;
       gap: 16px;
     }
+    .tools-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .tool-row {
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-inner);
+      padding: 10px 12px;
+      background: var(--bg-panel);
+      display: flex;
+      gap: 12px;
+      justify-content: space-between;
+      align-items: flex-start;
+    }
+    .tool-row .tool-meta {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      min-width: 0;
+    }
+    .tool-row .tool-title {
+      font-weight: 700;
+      color: var(--text-main);
+    }
+    .tool-row .tool-desc {
+      color: var(--text-muted);
+      font-size: 12px;
+      word-break: break-word;
+    }
+    .tool-row .tool-actions {
+      display: flex;
+      gap: 8px;
+    }
+    .tool-row button {
+      border: 1px solid var(--border-subtle);
+      background: var(--bg-input);
+      border-radius: var(--radius-inner);
+      padding: 6px 10px;
+      cursor: pointer;
+      color: var(--text-main);
+    }
+    .tool-form {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 10px;
+      margin-top: 8px;
+    }
+    .tool-form label {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--text-muted);
+    }
+    .tool-form input,
+    .tool-form textarea {
+      width: 100%;
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-inner);
+      padding: 10px 12px;
+      background: var(--bg-input);
+      font-family: inherit;
+    }
+    .tool-form textarea {
+      min-height: 120px;
+      resize: vertical;
+    }
+    .tool-form .tool-actions-inline {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .tool-form .tool-error {
+      color: #b91c1c;
+      font-size: 12px;
+    }
+    .tool-form button[type="submit"] {
+      background: var(--accent);
+      color: #fff;
+    }
+    .tool-form-hint {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-top: 4px;
+    }
     .model-modal-header {
       display: flex;
       align-items: center;
@@ -942,6 +1028,12 @@
                   <button type="button" class="remove" id="remove-image-btn" aria-label="Remove image">×</button>
                 </span>
               </div>
+              <div id="tools-tool" class="tool tools-tool hidden">
+                <button type="button" class="tool-btn" id="manage-tools-btn">Tools</button>
+                <span class="chip hidden" id="tools-chip">
+                  <span id="tools-chip-label"></span>
+                </span>
+              </div>
               <label class="chip hidden" id="thinking-chip">
                 <input type="checkbox" id="thinking-toggle">
                 <span>Thinking</span>
@@ -963,6 +1055,37 @@
       <button class="model-modal-close" id="model-modal-close" aria-label="Close model picker">×</button>
     </div>
     <div class="model-grid" id="model-grid"></div>
+  </div>
+</div>
+<div class="model-modal hidden" id="tools-modal" role="dialog" aria-modal="true" aria-labelledby="tools-modal-title">
+  <div class="model-modal-content">
+    <div class="model-modal-header">
+      <div>
+        <div class="model-modal-title" id="tools-modal-title">Tools</div>
+        <p class="model-modal-sub" id="tools-modal-sub">Define tools to expose to this model</p>
+      </div>
+      <button class="model-modal-close" id="tools-modal-close" aria-label="Close tools modal">×</button>
+    </div>
+    <div class="tools-list" id="tools-list"></div>
+    <form class="tool-form" id="tool-form">
+      <div>
+        <label for="tool-name">Name</label>
+        <input id="tool-name" placeholder="get_weather" required>
+      </div>
+      <div>
+        <label for="tool-desc">Description</label>
+        <input id="tool-desc" placeholder="Describe what the tool does" required>
+      </div>
+      <div>
+        <label for="tool-schema">Parameters JSON (Ollama tool schema)</label>
+        <textarea id="tool-schema" spellcheck="false" placeholder='{\"type\":\"object\",\"properties\":{\"location\":{\"type\":\"string\"}},\"required\":[\"location\"]}' required></textarea>
+        <div class="tool-form-hint">Must be valid JSON Schema object and will be sent as <code>function.parameters</code>.</div>
+      </div>
+      <div class="tool-actions-inline">
+        <button type="submit">Add/Update tool</button>
+        <div class="tool-error hidden" id="tool-error"></div>
+      </div>
+    </form>
   </div>
 </div>
 <script>
@@ -1028,11 +1151,12 @@ const state = {
   messages: [],
   selectedModel: null,
   availableModels: [],
-  currentCapabilities: { supports_images: false, supports_thinking: false },
+  currentCapabilities: { supports_images: false, supports_thinking: false, supports_tools: false },
   modelCapsCache: new Map(),
   thumbsCache: new Map(),
   theme: 'light',
   userPreferences: {},
+  tools: [],
   pendingImage: null,
   thinkingEnabled: false,
   uploadStatuses: new Map(),
@@ -1090,6 +1214,19 @@ const els = {
   imageChip: document.getElementById('image-chip'),
   imageChipLabel: document.getElementById('image-chip-label'),
   removeImageBtn: document.getElementById('remove-image-btn'),
+  toolsTool: document.getElementById('tools-tool'),
+  manageToolsBtn: document.getElementById('manage-tools-btn'),
+  toolsChip: document.getElementById('tools-chip'),
+  toolsChipLabel: document.getElementById('tools-chip-label'),
+  toolsModal: document.getElementById('tools-modal'),
+  toolsModalClose: document.getElementById('tools-modal-close'),
+  toolsModalSub: document.getElementById('tools-modal-sub'),
+  toolsList: document.getElementById('tools-list'),
+  toolForm: document.getElementById('tool-form'),
+  toolNameInput: document.getElementById('tool-name'),
+  toolDescInput: document.getElementById('tool-desc'),
+  toolSchemaInput: document.getElementById('tool-schema'),
+  toolError: document.getElementById('tool-error'),
   thinkingToggle: document.getElementById('thinking-toggle'),
   thinkingChip: document.getElementById('thinking-chip'),
   sessionsSidebar: document.getElementById('sessions-sidebar'),
@@ -1215,6 +1352,8 @@ function applyTheme(theme){
 
 async function saveUserPreferences() {
   if (!state.session || !state.session.username) return;
+  if (!state.userPreferences) state.userPreferences = {};
+  state.userPreferences.tools = state.tools || [];
   try {
     await nknSendRequestWithRetry({ event: 'user.prefs.set', preferences: state.userPreferences || {} });
   } catch (err){
@@ -1229,6 +1368,8 @@ async function fetchUserPreferences() {
     const prefs = (resp && typeof resp.preferences === 'object') ? resp.preferences : {};
     state.userPreferences = prefs;
     if (prefs.theme) applyTheme(prefs.theme);
+    state.tools = Array.isArray(prefs.tools) ? prefs.tools : [];
+    updateToolsChip();
     return prefs;
   } catch (err){
     console.warn('Failed to load preferences', err);
@@ -1237,7 +1378,7 @@ async function fetchUserPreferences() {
 }
 
 function getCapabilitiesForModel(modelName){
-  if (!modelName) return { supports_images: false, supports_thinking: false };
+  if (!modelName) return { supports_images: false, supports_thinking: false, supports_tools: false };
   const target = (state.availableModels || []).find((m) => m.name === modelName);
   if (target && target.capabilities){
     state.modelCapsCache.set(modelName, target.capabilities);
@@ -1300,7 +1441,8 @@ function inferCapabilitiesFromNameFrontend(name){
   const lowered = (name || '').toLowerCase();
   const supportsImages = ['vision', 'vl', 'clip', 'llava', 'vmodel', 'gpt-4o', 'vision-', 'mm', 'multimodal', 'moondream', 'idefics', 'qwen-vl'].some(k => lowered.includes(k));
   const supportsThinking = ['think', 'deepseek', 'reason', 'qwen2.5', 'qwen2.5-thinking', 'thinking'].some(k => lowered.includes(k));
-  return { supports_images: supportsImages, supports_thinking: supportsThinking };
+  const supportsTools = ['tool', 'function', 'function_call', 'function-call', 'functions'].some(k => lowered.includes(k));
+  return { supports_images: supportsImages, supports_thinking: supportsThinking, supports_tools: supportsTools };
 }
 
 async function fetchAvailableModels(){
@@ -1322,11 +1464,13 @@ async function fetchAvailableModels(){
         entry.capabilities = {
           supports_images: Boolean(mergedCaps.supports_images) || detailsCaps.some(c => typeof c === 'string' && /vision|image|multimodal|vl|mm/i.test(c)),
           supports_thinking: Boolean(mergedCaps.supports_thinking) || detailsCaps.some(c => typeof c === 'string' && /think|reason|monologue/i.test(c)),
+          supports_tools: Boolean(mergedCaps.supports_tools) || detailsCaps.some(c => typeof c === 'string' && /tool|function/i.test(c)),
         };
         // Fallback heuristics if still false
         const inferred = inferCapabilitiesFromNameFrontend(entry.name);
         entry.capabilities.supports_images = entry.capabilities.supports_images || inferred.supports_images;
         entry.capabilities.supports_thinking = entry.capabilities.supports_thinking || inferred.supports_thinking;
+        entry.capabilities.supports_tools = entry.capabilities.supports_tools || inferred.supports_tools;
         if (entry.name) state.modelCapsCache.set(entry.name, entry.capabilities);
         return entry;
       })
@@ -1426,6 +1570,138 @@ async function handleModelSelect(modelName){
   } catch (err) {
     toast(err.message || 'Unable to set model', false);
   }
+}
+
+function renderToolsList(){
+  if (!els.toolsList) return;
+  const tools = getActiveTools();
+  if (!tools.length){
+    els.toolsList.innerHTML = '<div class="model-card empty">No tools defined. Add one below.</div>';
+    return;
+  }
+  els.toolsList.innerHTML = tools.map((tool, idx) => {
+    const fn = tool.function || {};
+    const paramsPreview = (() => {
+      try {
+        return JSON.stringify(fn.parameters || {}, null, 0).slice(0, 120);
+      } catch {
+        return '';
+      }
+    })();
+    return `
+      <div class="tool-row" data-index="${idx}">
+        <div class="tool-meta">
+          <div class="tool-title">${escapeHtml(fn.name || '')}</div>
+          <div class="tool-desc">${escapeHtml(fn.description || '')}</div>
+          <div class="tool-desc"><code>parameters</code>: ${escapeHtml(paramsPreview)}</div>
+        </div>
+        <div class="tool-actions">
+          <button type="button" data-action="edit" data-index="${idx}">Edit</button>
+          <button type="button" data-action="delete" data-index="${idx}">Delete</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  els.toolsList.querySelectorAll('button[data-action="edit"]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const idx = Number(btn.dataset.index);
+      const toolsArr = getActiveTools();
+      const target = toolsArr[idx];
+      if (!target) return;
+      const fn = target.function || {};
+      if (els.toolNameInput) els.toolNameInput.value = fn.name || '';
+      if (els.toolDescInput) els.toolDescInput.value = fn.description || '';
+      if (els.toolSchemaInput) {
+        try {
+          els.toolSchemaInput.value = JSON.stringify(fn.parameters || {}, null, 2);
+        } catch {
+          els.toolSchemaInput.value = '';
+        }
+      }
+      if (els.toolsModal) els.toolsModal.scrollTop = 0;
+    });
+  });
+
+  els.toolsList.querySelectorAll('button[data-action="delete"]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const idx = Number(btn.dataset.index);
+      const toolsArr = Array.isArray(state.tools) ? [...state.tools] : [];
+      toolsArr.splice(idx, 1);
+      state.tools = toolsArr;
+      updateToolsChip();
+      saveUserPreferences();
+      renderToolsList();
+    });
+  });
+}
+
+function openToolsModal(){
+  if (!els.toolsModal) return;
+  if (!state.session){
+    toast('Sign in first', false);
+    return;
+  }
+  if (!state.currentCapabilities.supports_tools){
+    toast('Current model does not support tools', false);
+    return;
+  }
+  renderToolsList();
+  if (els.toolsModalSub) els.toolsModalSub.textContent = `Tools for ${getModelLabel()}`;
+  els.toolsModal.classList.remove('hidden');
+}
+
+function closeToolsModal(){
+  if (els.toolsModal) els.toolsModal.classList.add('hidden');
+  if (els.toolError) els.toolError.classList.add('hidden');
+}
+
+function handleToolSubmit(event){
+  event.preventDefault();
+  if (els.toolError) els.toolError.classList.add('hidden');
+  const name = (els.toolNameInput?.value || '').trim();
+  const description = (els.toolDescInput?.value || '').trim();
+  const schemaRaw = (els.toolSchemaInput?.value || '').trim();
+  if (!name || !schemaRaw){
+    if (els.toolError){
+      els.toolError.textContent = 'Name and parameters are required.';
+      els.toolError.classList.remove('hidden');
+    }
+    return;
+  }
+  let paramsObj = {};
+  try {
+    paramsObj = JSON.parse(schemaRaw);
+    if (typeof paramsObj !== 'object' || paramsObj === null || Array.isArray(paramsObj)){
+      throw new Error('Parameters must be a JSON object');
+    }
+  } catch (err){
+    if (els.toolError){
+      els.toolError.textContent = err.message || 'Parameters must be valid JSON';
+      els.toolError.classList.remove('hidden');
+    }
+    return;
+  }
+  const definition = {
+    type: 'function',
+    function: {
+      name,
+      description,
+      parameters: paramsObj,
+    },
+  };
+  const toolsArr = Array.isArray(state.tools) ? [...state.tools] : [];
+  const existingIdx = toolsArr.findIndex((t) => t && t.function && t.function.name === name);
+  if (existingIdx >= 0){
+    toolsArr[existingIdx] = definition;
+  } else {
+    toolsArr.push(definition);
+  }
+  state.tools = toolsArr;
+  updateToolsChip();
+  renderToolsList();
+  saveUserPreferences();
+  toast(`Saved tool ${name}`);
 }
 
 async function setSessionModel(modelName){
@@ -2361,6 +2637,8 @@ async function performLogin(username, password, { auto }) {
     if (state.userPreferences.theme) {
       applyTheme(state.userPreferences.theme);
     }
+    state.tools = Array.isArray(state.userPreferences.tools) ? state.userPreferences.tools : [];
+    updateToolsChip();
 
     applyLoginSuccess(uname, sessions, currentSessionId, messages, resp.current_session_model);
 
@@ -2389,6 +2667,10 @@ function applyLoginSuccess(username, sessions, currentSessionId, messages, curre
   state.currentSessionId = currentSessionId;
   if (state.userPreferences && state.userPreferences.theme){
     applyTheme(state.userPreferences.theme);
+  }
+  if (Array.isArray(state.userPreferences?.tools)) {
+    state.tools = state.userPreferences.tools;
+    updateToolsChip();
   }
   // Refresh preferences from server to ensure latest (non-blocking)
   fetchUserPreferences().catch(() => {});
@@ -2422,6 +2704,7 @@ async function handleLogout(){
   state.currentSessionId = null;
   state.messages = [];
   state.userPreferences = {};
+  state.tools = [];
   state.selectedModel = null;
   state.availableModels = [];
   // Clear auto-refresh timer
@@ -2439,6 +2722,7 @@ async function handleLogout(){
   prefillSavedCreds();
   // Reset modal to connect state
   switchLoginModalState('connect');
+  updateToolsChip();
 }
 
 function generateMessageId(){
@@ -2466,6 +2750,7 @@ function formatCapabilityBadges(capabilities){
       switch (key) {
         case 'supports_images': return 'Images';
         case 'supports_thinking': return 'Thinking';
+        case 'supports_tools': return 'Tools';
         default: return key.replace(/_/g, ' ');
       }
     });
@@ -2783,6 +3068,13 @@ function updateToolVisibility(){
     if (els.imageInput) els.imageInput.disabled = !showImages;
     if (!showImages) removePendingImage();
   }
+  const supportsTools = caps.supports_tools || (entry && entry.capabilities && entry.capabilities.supports_tools) || (state.modelCapsCache.get(modelName || '') || {}).supports_tools;
+  const showTools = !!supportsTools;
+  if (els.toolsTool){
+    els.toolsTool.classList.toggle('hidden', !showTools);
+    if (els.manageToolsBtn) els.manageToolsBtn.disabled = !showTools;
+    updateToolsChip();
+  }
   if (els.thinkingChip){
     els.thinkingChip.classList.toggle('hidden', !caps.supports_thinking);
     if (!caps.supports_thinking){
@@ -2869,6 +3161,43 @@ function updatePendingImageUI(){
   } else {
     els.imageChip.classList.add('hidden');
   }
+}
+
+function validToolDefinition(tool){
+  if (!tool || typeof tool !== 'object') return false;
+  const fn = tool.function || {};
+  return tool.type === 'function' && !!fn.name && typeof fn.parameters === 'object';
+}
+
+function getActiveTools(){
+  if (!Array.isArray(state.tools)) return [];
+  return state.tools.filter(validToolDefinition);
+}
+
+function updateToolsChip(){
+  if (!els.toolsChip) return;
+  const count = getActiveTools().length;
+  els.toolsChip.classList.toggle('hidden', !count);
+  if (els.toolsChipLabel){
+    els.toolsChipLabel.textContent = count ? `${count} tool${count === 1 ? '' : 's'}` : '';
+  }
+}
+
+function handleToolCallsEvent(toolCalls){
+  const calls = Array.isArray(toolCalls) ? toolCalls : (toolCalls ? [toolCalls] : []);
+  if (!calls.length) return;
+  const summaries = calls.map((call) => {
+    const fn = (call && call.function) || {};
+    let args = fn.arguments;
+    if (args && typeof args === 'object'){
+      try { args = JSON.stringify(args); } catch (_) { args = '[object]'; }
+    }
+    return `• ${fn.name || 'tool'}(${args || ''})`;
+  });
+  logActivity(`Tool call: ${summaries.join(' | ')}`);
+  const body = renderBubble('assistant', '', generateMessageId());
+  const content = `*Model requested tool call(s):*\n${summaries.join('\n')}\n\n_Tool execution is not automated; run the requested tool manually._`;
+  renderMarkdown(body, content);
 }
 
 const IMAGE_CHUNK_MAX_BYTES = 60 * 1024; // keep under RTC send limits
@@ -3263,22 +3592,28 @@ async function handleSend(event){
       }
     };
 
-    const payload = {
-      message: text,
-      user_uuid: userMsgId,
-      assistant_uuid: assistantMsgId,
-      thinking: caps.supports_thinking ? state.thinkingEnabled : false
-    };
-    if (imageUploadId){
-      payload.image_upload_id = imageUploadId;
-      payload.image_mime = pendingImageInfo?.type || '';
-      payload.image_name = pendingImageInfo?.name || 'image';
-      if (imageThumb) payload.image_thumb = imageThumb;
-    }
-    streamViaNkn(payload, handlers);
-  } finally {
-    state.pendingSend = false;
+  const payload = {
+    message: text,
+    user_uuid: userMsgId,
+    assistant_uuid: assistantMsgId,
+    thinking: caps.supports_thinking ? state.thinkingEnabled : false
+  };
+  if (imageUploadId){
+    payload.image_upload_id = imageUploadId;
+    payload.image_mime = pendingImageInfo?.type || '';
+    payload.image_name = pendingImageInfo?.name || 'image';
+    if (imageThumb) payload.image_thumb = imageThumb;
   }
+  if (caps.supports_tools){
+    const tools = getActiveTools();
+    if (tools.length){
+      payload.tools = tools;
+    }
+  }
+  streamViaNkn(payload, handlers);
+} finally {
+  state.pendingSend = false;
+}
 }
 
 function decodePayload(payload){
@@ -3286,6 +3621,19 @@ function decodePayload(payload){
   if (payload instanceof Uint8Array) return new TextDecoder().decode(payload);
   if (payload && payload.payload) return decodePayload(payload.payload);
   return '';
+}
+
+function escapeHtml(str){
+  return String(str || '').replace(/[&<>"']/g, (ch) => {
+    switch (ch) {
+      case '&': return '&amp;';
+      case '<': return '&lt;';
+      case '>': return '&gt;';
+      case '"': return '&quot;';
+      case "'": return '&#39;';
+      default: return ch;
+    }
+  });
 }
 
 async function ensureNknClient(){
@@ -3397,7 +3745,9 @@ function handleNknMessage(src, payload){
   }
 
   if (ctx.kind === 'stream'){
-    if (event === 'chat.delta'){
+    if (event === 'chat.tool_calls'){
+      handleToolCallsEvent(data.tool_calls || data.toolCalls || []);
+    } else if (event === 'chat.delta'){
       // Pass delta with sequence number and batch size
       ctx.handlers.onDelta(data.delta || '', data.seq, data.batch_size);
     } else if (event === 'chat.done'){
@@ -3619,6 +3969,7 @@ function init(){
   renderHistory();
   updateSessionUI();
   updateToolVisibility();
+  updateToolsChip();
   updatePendingImageUI();
 
   // Auto-login will happen in checkRelay() after NKN connects
@@ -3796,6 +4147,16 @@ if (els.attachImageBtn && els.imageInput){
   els.imageInput.addEventListener('change', handleImageSelected);
 }
 if (els.removeImageBtn) els.removeImageBtn.addEventListener('click', removePendingImage);
+if (els.manageToolsBtn) els.manageToolsBtn.addEventListener('click', openToolsModal);
+if (els.toolsModalClose) els.toolsModalClose.addEventListener('click', closeToolsModal);
+if (els.toolsModal){
+  els.toolsModal.addEventListener('click', (e) => {
+    if (e.target === els.toolsModal) closeToolsModal();
+  });
+}
+if (els.toolForm){
+  els.toolForm.addEventListener('submit', handleToolSubmit);
+}
 if (els.thinkingToggle){
   els.thinkingToggle.addEventListener('change', (e) => {
     state.thinkingEnabled = !!e.target.checked;
@@ -3826,9 +4187,12 @@ if (els.themeToggle){
     saveUserPreferences();
   });
 }
-document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') closeModelModal();
-});
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      closeModelModal();
+      closeToolsModal();
+    }
+  });
 
 function setViewportHeight(){
   const vh = window.innerHeight * 0.01;

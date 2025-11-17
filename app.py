@@ -94,7 +94,18 @@ def infer_capabilities_from_name(name: str) -> Dict[str, bool]:
             "thinking",
         ]
     )
-    return {"supports_images": supports_images, "supports_thinking": supports_thinking}
+    supports_tools = any(
+        key in lowered
+        for key in [
+            "tool",
+            "tools",
+            "function",
+            "functions",
+            "function_call",
+            "function-call",
+        ]
+    )
+    return {"supports_images": supports_images, "supports_thinking": supports_thinking, "supports_tools": supports_tools}
 
 
 def infer_capabilities(name: str, details: Optional[Dict[str, Any]] = None) -> Dict[str, bool]:
@@ -115,6 +126,8 @@ def infer_capabilities(name: str, details: Optional[Dict[str, Any]] = None) -> D
         caps["supports_images"] = True
     if any(tok in ("thinking", "think", "reason", "reasoning") for tok in meta_tokens):
         caps["supports_thinking"] = True
+    if any(tok in ("tool", "tools", "function", "functions", "function_call", "function-calling", "function-calls") or "tool" in tok for tok in meta_tokens):
+        caps["supports_tools"] = True
     return caps
 
 
@@ -844,7 +857,7 @@ class OllamaClient:
         self._timeout = timeout_s
         self._keep_alive = keep_alive
 
-    def stream(self, messages: List[Dict[str, str]], model_name: Optional[str] = None) -> Iterable[Dict[str, Any]]:
+    def stream(self, messages: List[Dict[str, str]], model_name: Optional[str] = None, tools: Optional[List[Dict[str, Any]]] = None) -> Iterable[Dict[str, Any]]:
         url = f"{self._base}{self._endpoint}"
         target_model = model_name or self._model
         payload: Dict[str, Any] = {
@@ -852,6 +865,8 @@ class OllamaClient:
             "messages": messages,
             "stream": True,
         }
+        if tools:
+            payload["tools"] = tools
         if self._keep_alive:
             payload["keep_alive"] = self._keep_alive
         response = requests.post(url, json=payload, timeout=self._timeout, stream=True)
@@ -895,6 +910,8 @@ class OllamaClient:
                 content = ""
                 if isinstance(message, dict):
                     content = message.get("content") or ""
+                    if message.get("tool_calls"):
+                        packet["tool_calls"] = message.get("tool_calls")
                 elif isinstance(message, str):
                     content = message
                 if content:
@@ -921,6 +938,8 @@ class OllamaClient:
             message = data.get("message") or {}
             if isinstance(message, dict):
                 packet["content"] = message.get("content") or ""
+                if message.get("tool_calls"):
+                    packet["tool_calls"] = message.get("tool_calls")
             elif isinstance(message, str):
                 packet["content"] = message
             if data.get("done"):
@@ -951,13 +970,32 @@ class OllamaClient:
         data = resp.json() or {}
         models = data.get("models") or []
         result: List[Dict[str, Any]] = []
+
+        def fetch_capabilities_via_show(model_name: str) -> Optional[List[str]]:
+            try:
+                show_resp = requests.post(f"{self._base}/api/show", json={"model": model_name}, timeout=10)
+                show_resp.raise_for_status()
+                show_data = show_resp.json() or {}
+                caps = show_data.get("capabilities")
+                if isinstance(caps, list):
+                    return [c for c in caps if isinstance(c, str)]
+            except Exception:
+                return None
+            return None
+
         for item in models:
             if not isinstance(item, dict):
                 continue
             name = item.get("name")
-            if name:
-                caps = infer_capabilities(name, item.get("details") or {})
-                result.append({"name": name, "details": item, "capabilities": caps})
+            if not name:
+                continue
+            details = item.get("details") or {}
+            if "capabilities" not in details:
+                caps_list = fetch_capabilities_via_show(name)
+                if caps_list:
+                    details = {**details, "capabilities": caps_list}
+            caps = infer_capabilities(name, details)
+            result.append({"name": name, "details": details, "capabilities": caps})
         return result
 
 
@@ -1966,6 +2004,27 @@ class NKNRelayServer:
         image_mime = payload.get("image_mime") or ""
         image_thumb = payload.get("image_thumb") or ""
         thinking_enabled = bool(payload.get("thinking"))
+        tools_payload = payload.get("tools") or []
+        if not isinstance(tools_payload, list):
+            tools_payload = []
+        clean_tools: List[Dict[str, Any]] = []
+        for entry in tools_payload:
+            if not isinstance(entry, dict):
+                continue
+            fn = entry.get("function") or {}
+            if entry.get("type") != "function" or not fn.get("name") or not isinstance(fn.get("parameters"), dict):
+                continue
+            clean_tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": fn.get("name"),
+                        "description": fn.get("description") or "",
+                        "parameters": fn.get("parameters") or {},
+                    },
+                }
+            )
+        tools_payload = clean_tools
         self._prune_expired_uploads()
 
         # Refresh session timestamp on activity
@@ -2026,7 +2085,7 @@ class NKNRelayServer:
         )
         threading.Thread(
             target=self._serve_chat,
-            args=(src, req_id, user_id, session_id, text, user_msg_uuid, assistant_msg_uuid, model_name, image_b64, image_mime, image_thumb, thinking_enabled),
+            args=(src, req_id, user_id, session_id, text, user_msg_uuid, assistant_msg_uuid, model_name, image_b64, image_mime, image_thumb, thinking_enabled, tools_payload),
             daemon=True,
         ).start()
 
@@ -2036,7 +2095,7 @@ class NKNRelayServer:
             if evt:
                 evt.set()
 
-    def _serve_chat(self, src: str, req_id: str, user_id: int, session_id: int, message_text: str, user_msg_uuid: str = None, assistant_msg_uuid: str = None, model_name: Optional[str] = None, image_b64: str = "", image_mime: str = "", image_thumb: str = "", thinking: bool = False) -> None:
+    def _serve_chat(self, src: str, req_id: str, user_id: int, session_id: int, message_text: str, user_msg_uuid: str = None, assistant_msg_uuid: str = None, model_name: Optional[str] = None, image_b64: str = "", image_mime: str = "", image_thumb: str = "", thinking: bool = False, tools: Optional[List[Dict[str, Any]]] = None) -> None:
         cancel_flag = threading.Event()
         with self._lock:
             self._active[req_id] = cancel_flag
@@ -2149,12 +2208,15 @@ class NKNRelayServer:
                 print(f"[chat] Progressive save: {len(accumulated)} chars, seq={seq_num}")
 
         try:
-            for packet in self._ollama.stream(assembled, model_name=model_name):
+            for packet in self._ollama.stream(assembled, model_name=model_name, tools=tools):
                 if cancel_flag.is_set():
                     break
                 if packet.get("keepalive"):
                     continue
                 delta = packet.get("content")
+                tool_calls = packet.get("tool_calls") or []
+                if tool_calls:
+                    self._send(src, {"event": "chat.tool_calls", "id": req_id, "tool_calls": tool_calls})
                 done_flag = packet.get("done")
                 if delta:
                     if not streaming_signaled:
