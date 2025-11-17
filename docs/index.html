@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <title>Inference Relay</title>
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github-dark.min.css">
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Radio+Canada:ital,wght@0,300..700;1,300..700&display=swap');
     :root {
@@ -321,6 +322,7 @@
     .chat-input-wrap {
       display: flex; flex-direction: column; gap: 8px;
       flex-shrink: 0;
+      max-height: 50%;
     }
     .chat-tools {
       display: flex;
@@ -482,12 +484,14 @@
     .chat-input-field {
       position: relative;
       width: 100%;
+      max-height: 100%;
     }
     .chat-input-field-control {
       width: 100%; min-height: 55px; border-radius: var(--radius-inner);
       border: 1px solid var(--border-subtle); padding: 14px 140px 14px 16px;
       font-size: 16px; background: var(--bg-input);
       font-family: inherit; box-shadow: none;
+      max-height:100%;
       transition: box-shadow 0.2s ease, border-color 0.2s ease;
       resize: none;
     }
@@ -768,9 +772,57 @@
       font-size: 14px;
       position: relative;
     }
+    .markdown-body code {
+      background: rgba(0,0,0,0.05);
+      padding: 2px 4px;
+      border-radius: 4px;
+      font-size: 12px;
+    }
     .markdown-body pre {
-      background: #111827; color: #f8fafc; padding: 8px 10px;
-      border-radius: var(--radius-inner); overflow-x: auto; font-size: 12px;
+      background: transparent;
+      color: inherit;
+      padding: 0;
+      border-radius: 0;
+      overflow-x: visible;
+      font-size: 12px;
+    }
+    .code-block-wrapper {
+      position: relative;
+      margin: 12px 0;
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-inner);
+      background: #0b1021;
+      box-shadow: 0 6px 16px rgba(0,0,0,0.08);
+    }
+    .code-block-wrapper pre {
+      margin: 0;
+      padding: 12px 14px 14px;
+      overflow-x: auto;
+      border-radius: var(--radius-inner);
+      background: transparent;
+    }
+    .copy-code-btn {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      padding: 5px 9px;
+      border: 1px solid var(--border-subtle);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.08);
+      color: #e5e7eb;
+      font-size: 11px;
+      cursor: pointer;
+      transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+    }
+    .copy-code-btn:hover {
+      background: rgba(255,255,255,0.16);
+      border-color: #cbd5e1;
+      color: #fff;
+    }
+    .copy-code-btn.copied {
+      background: rgba(34,197,94,0.16);
+      color: #34d399;
+      border-color: rgba(34,197,94,0.4);
     }
 
     /* Sessions Sidebar */
@@ -920,6 +972,7 @@
     }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/common.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/nkn-sdk@1.3.6/dist/nkn.min.js"></script>
   <script src="novio-sdk.js"></script>
 </head>
@@ -2431,6 +2484,72 @@ function renderHistory(){
   checkIncompleteMessages();
 }
 
+async function copyToClipboard(text){
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText){
+      await navigator.clipboard.writeText(text || '');
+      return true;
+    }
+  } catch (err) {
+    console.warn('Clipboard API failed, falling back', err);
+  }
+  const textarea = document.createElement('textarea');
+  textarea.value = text || '';
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.top = '-9999px';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  textarea.select();
+  let ok = false;
+  try {
+    ok = document.execCommand('copy');
+  } catch (err) {
+    ok = false;
+  }
+  document.body.removeChild(textarea);
+  return ok;
+}
+
+function enhanceCodeBlocks(root){
+  if (!root) return;
+  const codeBlocks = root.querySelectorAll('pre > code');
+  codeBlocks.forEach((code) => {
+    const pre = code.parentElement;
+    if (!pre || pre.dataset.enhanced === 'true') return;
+    pre.dataset.enhanced = 'true';
+
+    if (window.hljs){
+      try {
+        hljs.highlightElement(code);
+      } catch (err) {
+        console.warn('Highlight failed', err);
+      }
+    }
+
+    const wrapper = document.createElement('div');
+    wrapper.className = 'code-block-wrapper';
+    pre.parentNode.insertBefore(wrapper, pre);
+    wrapper.appendChild(pre);
+
+    const copyBtn = document.createElement('button');
+    copyBtn.type = 'button';
+    copyBtn.className = 'copy-code-btn';
+    copyBtn.textContent = 'Copy';
+    copyBtn.addEventListener('click', async () => {
+      const ok = await copyToClipboard(code.textContent || '');
+      copyBtn.textContent = ok ? 'Copied!' : 'Copy failed';
+      copyBtn.classList.toggle('copied', ok);
+      setTimeout(() => {
+        copyBtn.textContent = 'Copy';
+        copyBtn.classList.remove('copied');
+      }, 1400);
+    });
+
+    wrapper.appendChild(copyBtn);
+  });
+}
+
 function renderMarkdown(node, text){
   if (!node) return;
   if (window.marked){
@@ -2438,6 +2557,7 @@ function renderMarkdown(node, text){
   } else {
     node.textContent = text || '';
   }
+  enhanceCodeBlocks(node);
 }
 
 function setBusy(v){
