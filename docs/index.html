@@ -52,6 +52,42 @@
       cursor: pointer;
       color: var(--text-main);
     }
+
+/* Firefox + general hint */
+* {
+  /* Firefox: thin colored scrollbars */
+  scrollbar-width: thin;
+  scrollbar-color: var(--text-muted) var(--bg-panel);
+}
+
+/* WebKit browsers: Chrome, Edge, Safari, Opera */
+*::-webkit-scrollbar {
+  width: 10px;   /* vertical scrollbar */
+  height: 10px;  /* horizontal scrollbar */
+}
+
+/* Track (background area) */
+*::-webkit-scrollbar-track {
+  background: var(--bg-panel);
+}
+
+/* Thumb (draggable handle) */
+*::-webkit-scrollbar-thumb {
+  background-color: var(--text-muted);
+  border-radius: 999px;
+  border: 2px solid var(--bg-panel); /* “pill” look against panel bg */
+}
+
+/* Hover state for thumb */
+*::-webkit-scrollbar-thumb:hover {
+  /* Slightly brighten the thumb without needing a new color variable */
+  filter: brightness(1.15);
+}
+
+/* Corner where horizontal & vertical scrollbars meet */
+*::-webkit-scrollbar-corner {
+  background: var(--bg-panel);
+}
     .app-shell { min-height: calc(var(--vh, 1vh) * 100); display: flex; flex-direction: column; position: relative; z-index: 1; }
     .app-header {
       padding: 16px 24px;
