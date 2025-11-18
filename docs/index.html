@@ -3855,9 +3855,17 @@ async function handleSend(event){
       },
       onError(err, isPartial){
         cancelUploadTimeout();
-        cleanupUpload({ removeStatus: true });
         const errMsg = err && err.message ? err.message : (typeof err === 'string' ? err : '');
-        if (imageUploadId) {
+        const uploadJob = imageUploadId ? state.uploadJobs.get(imageUploadId) : null;
+        const alreadyFinished = assistantMessage.is_complete || !!assistantMessage.content;
+        if (alreadyFinished || (uploadJob && uploadJob.completed)) {
+          // Ignore late/duplicate errors for requests that already produced output
+          logActivity(`Ignoring late chat error after completion: ${errMsg || 'unknown'}`, false);
+          cleanupUpload({ removeStatus: true });
+          return;
+        }
+        cleanupUpload({ removeStatus: true });
+        if (imageUploadId && !(uploadJob && uploadJob.completed)) {
           renderUploadFailureMessage(errMsg || 'Upload failed before chat started.', imageUploadId);
         }
         const isAuthError = typeof errMsg === 'string' && /not_authenticated/i.test(errMsg);
