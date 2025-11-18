@@ -341,7 +341,14 @@
       cursor: pointer;
       color: var(--text-main);
     }
-    .tool-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .tool-btn:disabled { 
+      opacity: 0.5; 
+      cursor: not-allowed; 
+    }
+
+  #image-chip{
+    padding:0px 10px!important;
+  }
   .chip {
     display: inline-flex;
     align-items: center;
@@ -4133,8 +4140,11 @@ async function ensureNknClient(){
     try {
       return await ensureNovioClient();
     } catch (err){
-      logActivity(`Novio path unavailable (${err.message || err}); falling back to direct NKN`, false);
+      const alreadyForced = state.nkn.forceDirect;
       state.nkn.forceDirect = true;
+      if (!alreadyForced){
+        logActivity(`Novio path unavailable (${err.message || err}); falling back to direct NKN`, false);
+      }
     }
   }
   return ensureDirectNknClient();
